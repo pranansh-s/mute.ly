@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Mute.ly",
+  "version": "1.0.0",
+  "description": "Proper youtube captions for those auto generated messy captions",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "*.js",
+        "assets/*.onnx",
+        "assets/*.worklet.js",
+        "assets/*.wasm"
+      ],
+      "matches": [
+        "https://youtube.com/*",
+        "https://www.youtube.com/*"
+      ]
+    }
+  ]
+}
