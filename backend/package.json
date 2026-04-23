@@ -9,6 +9,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "hono": "^4.7.0",
+    "openai": "^6.34.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

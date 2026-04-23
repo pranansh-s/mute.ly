@@ -11,7 +11,8 @@
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "https://youtube.com/*"
+    "https://youtube.com/*",
+    "http://localhost/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -38,7 +39,8 @@
         "*.js",
         "assets/*.onnx",
         "assets/*.worklet.js",
-        "assets/*.wasm"
+        "assets/*.wasm",
+        "assets/*.mjs"
       ],
       "matches": [
         "https://youtube.com/*",

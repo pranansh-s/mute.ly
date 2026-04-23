@@ -1,11 +1,9 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 
 export default defineConfig({
   plugins: [
-    react(),
     viteStaticCopy({
       targets: [
         {
@@ -17,7 +15,7 @@ export default defineConfig({
           dest: 'assets'
         },
         {
-          src: 'node_modules/onnxruntime-web/dist/*.wasm',
+          src: 'node_modules/onnxruntime-web/dist/*.{wasm,mjs}',
           dest: 'assets'
         }
       ]

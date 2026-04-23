@@ -4,9 +4,12 @@ export class SubtitleOverlay {
 
   constructor() {
     this.injectOverlay();
+
+    const observer = new MutationObserver(this.injectOverlay);
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  private injectOverlay() {
+  private injectOverlay = () => {
     if (this.container) return;
 
     const playerContainer = document.querySelector('.html5-video-player');
@@ -16,7 +19,13 @@ export class SubtitleOverlay {
     this.container.id = 'mutely-subtitle-overlay';
 
     Object.assign(this.container.style, {
+      position: 'absolute',
+      bottom: '10%',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      width: '80%',
       textAlign: 'center',
+      pointerEvents: 'none',
       zIndex: '9999',
       transition: 'opacity 0.2s ease-in-out',
       opacity: '0',
@@ -31,9 +40,6 @@ export class SubtitleOverlay {
       fontFamily: '"YouTube Noto", Roboto, Arial, sans-serif',
       fontSize: '24px',
       fontWeight: '500',
-      textShadow: '0px 2px 4px rgba(0,0,0,0.8)',
-      border: '1px solid rgba(255, 64, 129, 0.4)',
-      boxShadow: '0 4px 12px rgba(255, 64, 129, 0.15)',
       display: 'inline-block',
       lineHeight: '1.4'
     });
@@ -43,6 +49,10 @@ export class SubtitleOverlay {
   }
 
   public renderText(text: string, isPartial: boolean = false) {
+    if (this.container && !document.body.contains(this.container)) {
+      this.destroy();
+    }
+
     if (!this.container || !this.textElement) {
       this.injectOverlay();
     }
@@ -57,8 +67,6 @@ export class SubtitleOverlay {
     this.container.style.opacity = '1';
 
     this.textElement.style.color = '#ffffff';
-    this.textElement.style.border = '1px solid rgba(255, 64, 129, 0.4)';
-    this.textElement.style.boxShadow = '0 4px 12px rgba(255, 64, 129, 0.15)';
     this.textElement.textContent = text;
   }
 
@@ -71,7 +79,7 @@ export class SubtitleOverlay {
     }
   }
 
-  public destroy() {
+  destroy() {
     if (this.container && this.container.parentNode) {
       this.container.parentNode.removeChild(this.container);
     }

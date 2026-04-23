@@ -23,31 +23,29 @@ class YouTubeMonitor {
     this.subtitleOverlay = new SubtitleOverlay();
     this.playerButton = new PlayerButton(() => this.toggleMonitoring());
 
+    this.currentVideoId = this.getVideoURL();
     this.initObserver();
-
-    setTimeout(() => {
-      if (!this.currentVideoId) {
-        const videoId = this.getVideoURL();
-        if (videoId) {
-          this.currentVideoId = videoId;
-        }
-      }
-    }, 1500);
   }
 
   private initObserver() {
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver(async () => {
       const videoId = this.getVideoURL();
 
       if (videoId && videoId !== this.currentVideoId) {
         this.currentVideoId = videoId;
 
         if (this.isRunning) {
-          this.stopProcessing();
-          this.startProcessing();
-        } else {
-          this.subtitleOverlay.clear();
+          this.setStatus('idle');
+          await this.stopProcessing();
+          await this.startProcessing();
         }
+        this.subtitleOverlay.clear();
+      } else if (!videoId && this.currentVideoId) {
+        this.currentVideoId = null;
+        if (this.isRunning) {
+          await this.stopMonitoring();
+        }
+        this.subtitleOverlay.destroy();
       }
     });
 
@@ -60,7 +58,7 @@ class YouTubeMonitor {
     return match ? match[1] : null;
   }
 
-  public toggleMonitoring() {
+  public toggleMonitoring = () => {
     if (this.isRunning) {
       this.stopMonitoring();
     } else {
@@ -72,6 +70,7 @@ class YouTubeMonitor {
     if (this.isRunning) return;
 
     this.isRunning = true;
+    this.setStatus('audio');
     this.subtitleOverlay.clear();
 
     if (!this.currentVideoId) {
@@ -87,32 +86,40 @@ class YouTubeMonitor {
     await this.startProcessing();
   }
 
-  public stopMonitoring(): void {
+  public async stopMonitoring(): Promise<void> {
     if (!this.isRunning) return;
 
     this.isRunning = false;
-    this.stopProcessing();
     this.setStatus('idle');
+    await this.stopProcessing();
     this.subtitleOverlay.clear();
   }
 
   private async startProcessing(): Promise<void> {
     try {
       this.transport = new TransportClient();
-      this.transport.connect(BACKEND_WS_URL, this.currentVideoId!, 0, (text, isPartial) => {
+
+      this.transport.onStatusChange = (connected) => {
+        if (!this.isRunning) return;
+        this.setStatus(connected ? 'audio' : 'error');
+      };
+
+      const timeDisplay = document.querySelector('.ytp-time-display');
+      const isLive = timeDisplay ? timeDisplay.classList.contains('ytp-live') : false;
+
+      this.transport.connect(BACKEND_WS_URL, this.currentVideoId!, isLive, (text, isPartial) => {
         this.subtitleOverlay.renderText(text, isPartial);
       });
 
-      this.setStatus('audio');
-      await this.audioExtractor.startExtraction(this.transport!);
+      await this.audioExtractor.startExtraction(this.transport!, isLive);
     } catch (error) {
       console.error('[Mute.ly] Failed to start STT processing:', error);
       this.setStatus('error');
     }
   }
 
-  private stopProcessing() {
-    this.audioExtractor.stopExtraction();
+  private async stopProcessing() {
+    await this.audioExtractor.stopExtraction();
     if (this.transport) {
       this.transport.disconnect();
       this.transport = null;
@@ -123,6 +130,7 @@ class YouTubeMonitor {
     this.status = newStatus;
     this.playerButton.updateState(this.status);
   }
+
 }
 
 const monitor = new YouTubeMonitor();

@@ -1,36 +1,24 @@
 export class PlayerButton {
-  private isObserving = false;
   private buttonElement: HTMLButtonElement | null = null;
+  private currentStatus: 'idle' | 'audio' | 'error' = 'idle';
 
-  private observer: MutationObserver | null = null;
   private toggleCallback: () => void;
 
   constructor(onToggle: () => void) {
     this.toggleCallback = onToggle;
-    if (this.isObserving) return;
 
-    this.tryInject();
-
-    this.observer = new MutationObserver(() => {
-      this.tryInject();
-    });
-
-    this.observer.observe(document.body, { childList: true, subtree: true });
-    this.isObserving = true;
+    const observer = new MutationObserver(this.inject);
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  private tryInject() {
+  private inject = () => {
     if (this.buttonElement && document.body.contains(this.buttonElement)) {
       return;
     }
 
-    const rightControls = document.querySelector('.ytp-right-controls');
-    if (!rightControls) return;
+    const container = document.querySelector('.ytp-right-controls');
+    if (!container) return;
 
-    this.inject(rightControls as HTMLElement);
-  }
-
-  private inject(container: HTMLElement) {
     this.buttonElement = document.createElement('button');
     this.buttonElement.id = 'mutely-player-button';
     this.buttonElement.className = 'ytp-button';
@@ -67,9 +55,11 @@ export class PlayerButton {
     });
 
     container.insertBefore(this.buttonElement, container.firstChild);
+    this.updateState(this.currentStatus);
   }
 
   public updateState(status: 'idle' | 'audio' | 'error') {
+    this.currentStatus = status;
     if (!this.buttonElement) return;
 
     const path = this.buttonElement.querySelector('.mutely-svg-path') as SVGPathElement;
@@ -83,24 +73,13 @@ export class PlayerButton {
     } else if (status === 'error') {
       path.setAttribute('fill', '#ff0000');
       this.buttonElement.setAttribute('data-active', 'false');
+      this.buttonElement.style.opacity = '1';
       this.buttonElement.setAttribute('title', 'Mute.ly Error - Click to retry');
     } else {
       path.setAttribute('fill', '#ffffff');
       this.buttonElement.setAttribute('data-active', 'false');
-      this.buttonElement.style.opacity = '0.9';
-      this.buttonElement.setAttribute('title', 'Start Mute.ly Captions');
+      this.buttonElement.style.opacity = '0.8';
+      this.buttonElement.setAttribute('title', 'Mute.ly Captions');
     }
-  }
-
-  public destroy() {
-    if (this.observer) {
-      this.observer.disconnect();
-      this.observer = null;
-    }
-    if (this.buttonElement && this.buttonElement.parentNode) {
-      this.buttonElement.parentNode.removeChild(this.buttonElement);
-    }
-    this.buttonElement = null;
-    this.isObserving = false;
   }
 }

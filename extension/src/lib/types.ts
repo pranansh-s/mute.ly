@@ -3,6 +3,7 @@ export type MonitorStatus = 'idle' | 'audio' | 'error';
 export interface InitMessage {
   type: 'init';
   videoId: string;
+  isLive: boolean;
 }
 
 export interface ServerAckMessage {
