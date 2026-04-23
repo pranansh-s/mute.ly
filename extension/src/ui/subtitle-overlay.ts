@@ -59,15 +59,22 @@ export class SubtitleOverlay {
 
     if (!this.container || !this.textElement) return;
 
-    if (!text || text.trim() === '') {
-      this.container.style.opacity = '0';
+    const cleanText = text ? text.trim() : '';
+
+    if (cleanText === '') {
+      if (this.container.style.opacity !== '0') {
+        this.container.style.opacity = '0';
+      }
       return;
     }
 
-    this.container.style.opacity = '1';
+    if (this.textElement.textContent === cleanText && this.container.style.opacity === '1') {
+      return;
+    }
 
-    this.textElement.style.color = '#ffffff';
-    this.textElement.textContent = text;
+    this.textElement.textContent = cleanText;
+    this.container.style.opacity = '1';
+    this.textElement.style.color = isPartial ? '#cccccc' : '#ffffff';
   }
 
   public clear() {

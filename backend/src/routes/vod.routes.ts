@@ -23,9 +23,20 @@ export function createVodRouter(stt: STTService) {
     return streamSSE(c, async (stream) => {
       let chunkIndex = 0;
       let pcmBuffer = Buffer.alloc(0);
+      let ytdlp: any = null;
+      let ffmpegProc: any = null;
+
+      const killProcesses = () => {
+        try {
+          if (ytdlp && !ytdlp.killed) ytdlp.kill('SIGKILL');
+          if (ffmpegProc && !ffmpegProc.killed) ffmpegProc.kill('SIGKILL');
+        } catch (e) {
+          // ignore kill errors
+        }
+      };
 
       try {
-        const ytdlp = spawn('yt-dlp', [
+        ytdlp = spawn('yt-dlp', [
           '--cookies-from-browser', 'chrome',
           '-f', 'bestaudio',
           '-o', '-',
@@ -34,7 +45,7 @@ export function createVodRouter(stt: STTService) {
           videoUrl,
         ]);
 
-        const ffmpegProc = spawn('ffmpeg', [
+        ffmpegProc = spawn('ffmpeg', [
           '-i', 'pipe:0',
           '-f', 's16le',
           '-acodec', 'pcm_s16le',
@@ -44,26 +55,30 @@ export function createVodRouter(stt: STTService) {
           'pipe:1',
         ]);
 
+        // Increase listeners limit for complex piping
+        ytdlp.setMaxListeners(20);
+        ffmpegProc.setMaxListeners(20);
+
         let ytdlpError = '';
         let ffmpegError = '';
 
         ytdlp.stdout.pipe(ffmpegProc.stdin);
 
-        ytdlp.stderr.on('data', (d) => {
+        ytdlp.stderr.on('data', (d: Buffer) => {
           ytdlpError += d.toString();
           if (ytdlpError.length > 10000) ytdlpError = ytdlpError.slice(-10000);
         });
 
-        ffmpegProc.stderr.on('data', (d) => {
+        ffmpegProc.stderr.on('data', (d: Buffer) => {
           ffmpegError += d.toString();
           if (ffmpegError.length > 10000) ffmpegError = ffmpegError.slice(-10000);
         });
 
-        ytdlp.on('error', (err) => {
+        ytdlp.once('error', (err: any) => {
           console.error(`[VOD] [${videoId}] yt-dlp spawn error:`, err.message);
         });
 
-        ffmpegProc.on('error', (err) => {
+        ffmpegProc.once('error', (err: any) => {
           console.error(`[VOD] [${videoId}] ffmpeg spawn error:`, err.message);
         });
 
@@ -75,13 +90,23 @@ export function createVodRouter(stt: STTService) {
             console.log(`[VOD] [${videoId}] Transcribing chunk ${index} (${startTime}s–${endTime}s)...`);
             const result = await stt.transcribe(chunk, true);
 
+            const segments = result.segments?.map(s => ({
+              start: startTime + s.start,
+              end: startTime + s.end,
+              text: s.text
+            })) || [
+                {
+                  start: startTime,
+                  end: endTime,
+                  text: result.text
+                }
+              ];
+
             await stream.writeSSE({
               event: 'transcript',
               data: JSON.stringify({
                 index,
-                startTimeSeconds: startTime,
-                endTimeSeconds: endTime,
-                text: result.text,
+                segments,
               }),
             });
           } catch (err) {
@@ -103,14 +128,16 @@ export function createVodRouter(stt: STTService) {
         const processPromise = processStream();
 
         await new Promise<void>((resolve, reject) => {
-          ytdlp.on('close', (code) => {
+          ytdlp.once('close', (code: number) => {
             if (code !== 0 && code !== null) {
               console.error(`[VOD] yt-dlp exited with code ${code}: ${ytdlpError}`);
             }
-            ffmpegProc.stdin.end();
+            if (ffmpegProc.stdin.writable) {
+              ffmpegProc.stdin.end();
+            }
           });
 
-          ffmpegProc.on('close', async (code) => {
+          ffmpegProc.once('close', async (code: number) => {
             if (code !== 0 && code !== null) {
               console.error(`[VOD] ffmpeg exited with code ${code}: ${ffmpegError}`);
             }
@@ -124,13 +151,23 @@ export function createVodRouter(stt: STTService) {
                 console.log(`[VOD] Transcribing final chunk ${chunkIndex} (${startTime}s–${(startTime + durationS).toFixed(1)}s)...`);
                 const result = await stt.transcribe(pcmBuffer, true);
 
+                const segments = result.segments?.map(s => ({
+                  start: startTime + s.start,
+                  end: startTime + s.end,
+                  text: s.text
+                })) || [
+                    {
+                      start: startTime,
+                      end: startTime + durationS,
+                      text: result.text
+                    }
+                  ];
+
                 await stream.writeSSE({
                   event: 'transcript',
                   data: JSON.stringify({
                     index: chunkIndex,
-                    startTimeSeconds: startTime,
-                    endTimeSeconds: Math.ceil(startTime + durationS),
-                    text: result.text,
+                    segments,
                   }),
                 });
                 chunkIndex++;
@@ -148,8 +185,7 @@ export function createVodRouter(stt: STTService) {
           });
 
           stream.onAbort(() => {
-            ytdlp.kill('SIGTERM');
-            ffmpegProc.kill('SIGTERM');
+            killProcesses();
             resolve();
           });
         });
@@ -160,6 +196,8 @@ export function createVodRouter(stt: STTService) {
           event: 'error',
           data: JSON.stringify({ error: 'Transcription pipeline failed' }),
         });
+      } finally {
+        killProcesses();
       }
 
       console.log(`[VOD] Finished transcription for ${videoId} (${chunkIndex} chunks)`);

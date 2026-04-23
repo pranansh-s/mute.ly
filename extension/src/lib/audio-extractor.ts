@@ -119,7 +119,8 @@ export class AudioExtractor {
   }
 
   private async startVODTranscription(transport: TransportClient, videoElement: HTMLVideoElement, videoId: string): Promise<void> {
-    const transcripts: { startTimeSeconds: number; endTimeSeconds: number; text: string }[] = [];
+    let segments: { start: number; end: number; text: string }[] = [];
+    let lastActiveSegment: { start: number; end: number; text: string } | null = null;
     let isDone = false;
 
     try {
@@ -136,33 +137,31 @@ export class AudioExtractor {
 
       console.log('[Mute.ly] SSE stream opened for VOD transcription');
 
-      // Start the caption sync loop immediately — it will display captions
-      // as they arrive from the stream
       const syncLoop = () => {
         if (!this.isExtracting) return;
 
         const currentTime = videoElement.currentTime;
-        const entry = transcripts.find(
-          (t) => currentTime >= t.startTimeSeconds && currentTime < t.endTimeSeconds
-        );
+        if (lastActiveSegment && currentTime >= lastActiveSegment.start && currentTime < lastActiveSegment.end) {
+        } else {
+          const match = segments.find(
+            (s) => currentTime >= s.start && currentTime < s.end
+          );
+          lastActiveSegment = match || null;
+        }
 
-        if (entry && entry.text) {
-          transport.handleIncomingCaption(entry.text, false);
+        if (lastActiveSegment && lastActiveSegment.text) {
+          transport.handleIncomingCaption(lastActiveSegment.text, false);
         } else {
           transport.handleIncomingCaption('', false);
         }
 
-        if (this.isExtracting && !isDone) {
-          setTimeout(syncLoop, 500);
-        } else if (isDone) {
-          // Keep syncing even after done — user may seek around
+        if (this.isExtracting) {
           setTimeout(syncLoop, 500);
         }
       };
 
       setTimeout(syncLoop, 500);
 
-      // Read SSE stream
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -183,13 +182,11 @@ export class AudioExtractor {
             try {
               const parsed = JSON.parse(jsonStr);
 
-              if (parsed.index !== undefined && parsed.text !== undefined) {
-                transcripts.push({
-                  startTimeSeconds: parsed.startTimeSeconds,
-                  endTimeSeconds: parsed.endTimeSeconds,
-                  text: parsed.text,
-                });
-                console.log(`[Mute.ly] Received transcript chunk ${parsed.index}: ${parsed.startTimeSeconds}s–${parsed.endTimeSeconds}s`);
+              if (parsed.segments) {
+                segments.push(...parsed.segments);
+                // Keep segments sorted by start time for stability
+                segments.sort((a, b) => a.start - b.start);
+                console.log(`[Mute.ly] Received ${parsed.segments.length} segments for chunk ${parsed.index}`);
               } else if (parsed.totalChunks !== undefined) {
                 isDone = true;
                 console.log(`[Mute.ly] VOD transcription complete: ${parsed.totalChunks} chunks`);

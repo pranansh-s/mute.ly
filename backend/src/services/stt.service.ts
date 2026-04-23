@@ -1,7 +1,14 @@
 import OpenAI, { toFile } from 'openai';
 
+export interface TranscriptionSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface TranscriptionResult {
   text: string;
+  segments?: TranscriptionSegment[];
   language?: string;
 }
 
@@ -19,29 +26,36 @@ export class STTService {
     try {
       const rms = this.calculateRMS(audioBuffer);
       if (rms < 100) {
-        return { text: '' };
+        return { text: '', segments: [] };
       }
 
       const wavBuffer = this.addWavHeader(audioBuffer, 16000, 1, 16);
       const file = await toFile(wavBuffer, 'audio.wav', { type: 'audio/wav' });
 
-      // Scale model up for VOD since we relax real-time constraint
       const modelIdentifier = useBetterModel ? 'Systran/faster-whisper-base.en' : 'Systran/faster-whisper-tiny.en';
 
-      const result = await this.openai.audio.transcriptions.create({
+      const result = (await this.openai.audio.transcriptions.create({
         file,
         model: modelIdentifier,
         language: 'en',
         temperature: 0,
-      });
+        response_format: 'verbose_json',
+      })) as any;
 
       const text = result.text?.trim() || '';
 
       if (this.isHallucination(text)) {
-        return { text: '' };
+        return { text: '', segments: [] };
       }
 
-      return { text };
+      return {
+        text,
+        segments: result.segments?.map((s: any) => ({
+          start: s.start,
+          end: s.end,
+          text: s.text?.trim() || '',
+        })) || [],
+      };
     } catch (error) {
       console.error('[STTService] Transcription failed:', error);
       return { text: '' };
