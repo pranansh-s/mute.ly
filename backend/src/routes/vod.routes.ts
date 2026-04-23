@@ -25,6 +25,7 @@ export function createVodRouter(stt: STTService) {
       let pcmBuffer = Buffer.alloc(0);
       let ytdlp: any = null;
       let ffmpegProc: any = null;
+      const transcriptionPromises: Promise<void>[] = [];
 
       const killProcesses = () => {
         try {
@@ -120,7 +121,9 @@ export function createVodRouter(stt: STTService) {
             while (pcmBuffer.length >= CHUNK_SIZE) {
               const chunk = pcmBuffer.subarray(0, CHUNK_SIZE);
               pcmBuffer = pcmBuffer.subarray(CHUNK_SIZE);
-              await transcribeChunk(chunk, chunkIndex++);
+              // Start transcription in background while reading next data
+              const promise = transcribeChunk(chunk, chunkIndex++);
+              transcriptionPromises.push(promise);
             }
           }
         };
@@ -144,6 +147,8 @@ export function createVodRouter(stt: STTService) {
 
             try {
               await processPromise;
+              await Promise.all(transcriptionPromises);
+
               if (pcmBuffer.length > SAMPLE_RATE * BYTES_PER_SAMPLE) {
                 const startTime = chunkIndex * CHUNK_DURATION_S;
                 const durationS = pcmBuffer.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
