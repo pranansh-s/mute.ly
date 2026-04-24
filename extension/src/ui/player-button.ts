@@ -6,12 +6,9 @@ export class PlayerButton {
 
   constructor(onToggle: () => void) {
     this.toggleCallback = onToggle;
-
-    const observer = new MutationObserver(this.inject);
-    observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  private inject = () => {
+  public checkAndInject = () => {
     if (this.buttonElement && document.body.contains(this.buttonElement)) {
       return;
     }

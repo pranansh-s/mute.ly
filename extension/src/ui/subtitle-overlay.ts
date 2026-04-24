@@ -3,14 +3,12 @@ export class SubtitleOverlay {
   private textElement: HTMLSpanElement | null = null;
 
   constructor() {
-    this.injectOverlay();
-
-    const observer = new MutationObserver(this.injectOverlay);
-    observer.observe(document.body, { childList: true, subtree: true });
+    this.checkAndInject();
   }
 
-  private injectOverlay = () => {
-    if (this.container) return;
+  public checkAndInject = () => {
+    if (this.container && document.body.contains(this.container)) return;
+    if (this.container) this.destroy();
 
     const playerContainer = document.querySelector('.html5-video-player');
     if (!playerContainer) return;
@@ -54,7 +52,7 @@ export class SubtitleOverlay {
     }
 
     if (!this.container || !this.textElement) {
-      this.injectOverlay();
+      this.checkAndInject();
     }
 
     if (!this.container || !this.textElement) return;

@@ -3,10 +3,12 @@ import { STTService } from './stt.service.js';
 
 const MAX_DISPLAY_WORDS = 15;
 
+type Task = { type: 'audio', buffer: Buffer } | { type: 'speech_end' };
+
 export class TranscriptionSession {
   private lastWords: string[] = [];
   private confirmedWords: string[] = [];
-  private pendingBuffer: Buffer | null = null;
+  private taskQueue: Task[] = [];
   private isProcessing = false;
   private emptyCount = 0;
 
@@ -20,17 +22,40 @@ export class TranscriptionSession {
   private clearTimer: NodeJS.Timeout | null = null;
 
   async processChunk(audioBuffer: Buffer) {
-    this.pendingBuffer = audioBuffer;
+    if (this.taskQueue.length > 0 && this.taskQueue[this.taskQueue.length - 1].type === 'audio') {
+      this.taskQueue[this.taskQueue.length - 1] = { type: 'audio', buffer: audioBuffer };
+    } else {
+      this.taskQueue.push({ type: 'audio', buffer: audioBuffer });
+    }
+    this.pump();
+  }
 
+  onSpeechEnd() {
+    this.taskQueue.push({ type: 'speech_end' });
+    this.pump();
+  }
+
+  private async pump() {
     if (this.isProcessing) return;
 
     this.isProcessing = true;
-    while (this.pendingBuffer !== null) {
-      const buffer = this.pendingBuffer;
-      this.pendingBuffer = null;
-      await this.runSTT(buffer);
+    while (this.taskQueue.length > 0) {
+      const task = this.taskQueue.shift()!;
+      if (task.type === 'audio') {
+        await this.runSTT(task.buffer);
+      } else if (task.type === 'speech_end') {
+        this.handleSpeechEnd();
+      }
     }
     this.isProcessing = false;
+  }
+
+  destroy() {
+    if (this.clearTimer) {
+      clearTimeout(this.clearTimer);
+      this.clearTimer = null;
+    }
+    this.taskQueue = [];
   }
 
   private async runSTT(audioBuffer: Buffer) {
@@ -100,7 +125,7 @@ export class TranscriptionSession {
     }
   }
 
-  onSpeechEnd() {
+  private handleSpeechEnd() {
     const displayText = this.lastWords.length > 0
       ? this.lastWords.join(' ')
       : this.confirmedWords.join(' ');

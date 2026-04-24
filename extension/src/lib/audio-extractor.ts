@@ -166,9 +166,9 @@ export class AudioExtractor {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      while (true) {
+      while (!this.abortController?.signal.aborted) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || this.abortController?.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -184,7 +184,6 @@ export class AudioExtractor {
 
               if (parsed.segments) {
                 segments.push(...parsed.segments);
-                // Keep segments sorted by start time for stability
                 segments.sort((a, b) => a.start - b.start);
                 console.log(`[Mute.ly] Received ${parsed.segments.length} segments for chunk ${parsed.index}`);
               } else if (parsed.totalChunks !== undefined) {
@@ -194,7 +193,6 @@ export class AudioExtractor {
                 console.error('[Mute.ly] Backend error:', parsed.error);
               }
             } catch {
-              // skip malformed JSON
             }
           }
         }
@@ -203,7 +201,6 @@ export class AudioExtractor {
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return;
       console.error('[Mute.ly] VOD transcription error:', error);
-      // Fallback to VAD if backend fails
       await this.startVADExtraction(transport, videoElement);
     }
   }
@@ -223,6 +220,7 @@ export class AudioExtractor {
     }
 
     if (this.capturedStream) {
+      this.capturedStream.getTracks().forEach(track => track.stop());
       this.capturedStream = null;
     }
 

@@ -29,6 +29,11 @@ class YouTubeMonitor {
 
   private initObserver() {
     const observer = new MutationObserver(async () => {
+      this.playerButton.checkAndInject();
+      if (this.isRunning) {
+        this.subtitleOverlay.checkAndInject();
+      }
+
       const videoId = this.getVideoURL();
 
       if (videoId && videoId !== this.currentVideoId) {

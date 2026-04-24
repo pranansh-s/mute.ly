@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { execSync } from 'child_process';
+import type { Server } from 'node:http';
 import { STTService } from './services/stt.service.js';
 import { createVodRouter } from './routes/vod.routes.js';
 import { SocketManager } from './socket.js';
@@ -39,4 +40,4 @@ const server = serve({
   console.log(`[HTTP] Backend listening on http://localhost:${info.port}`);
 });
 
-const socketManager = new SocketManager(server as any, sttService);
+const socketManager = new SocketManager(server as unknown as Server, sttService);

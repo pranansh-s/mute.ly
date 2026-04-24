@@ -21,18 +21,18 @@ export function createVodRouter(stt: STTService) {
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
     return streamSSE(c, async (stream) => {
+      let isAborted = false;
       let chunkIndex = 0;
       let pcmBuffer = Buffer.alloc(0);
       let ytdlp: any = null;
       let ffmpegProc: any = null;
-      const transcriptionPromises: Promise<void>[] = [];
+      const activePromises = new Set<Promise<void>>();
 
       const killProcesses = () => {
         try {
           if (ytdlp && !ytdlp.killed) ytdlp.kill('SIGKILL');
           if (ffmpegProc && !ffmpegProc.killed) ffmpegProc.kill('SIGKILL');
         } catch (e) {
-          // ignore kill errors
         }
       };
 
@@ -56,7 +56,6 @@ export function createVodRouter(stt: STTService) {
           'pipe:1',
         ]);
 
-        // Increase listeners limit for complex piping
         ytdlp.setMaxListeners(20);
         ffmpegProc.setMaxListeners(20);
 
@@ -84,12 +83,14 @@ export function createVodRouter(stt: STTService) {
         });
 
         const transcribeChunk = async (chunk: Buffer, index: number) => {
+          if (isAborted) return;
           const startTime = index * CHUNK_DURATION_S;
           const endTime = (index + 1) * CHUNK_DURATION_S;
 
           try {
             console.log(`[VOD] [${videoId}] Transcribing chunk ${index} (${startTime}s–${endTime}s)...`);
             const result = await stt.transcribe(chunk, true);
+            if (isAborted) return;
 
             const segments = result.segments?.map(s => ({
               start: startTime + s.start,
@@ -117,13 +118,21 @@ export function createVodRouter(stt: STTService) {
 
         const processStream = async () => {
           for await (const data of ffmpegProc.stdout) {
+            if (isAborted) break;
             pcmBuffer = Buffer.concat([pcmBuffer, data]);
             while (pcmBuffer.length >= CHUNK_SIZE) {
+              if (isAborted) break;
               const chunk = pcmBuffer.subarray(0, CHUNK_SIZE);
               pcmBuffer = pcmBuffer.subarray(CHUNK_SIZE);
-              // Start transcription in background while reading next data
+              
+              if (activePromises.size >= 3) {
+                await Promise.race(activePromises);
+              }
+              if (isAborted) break;
+
               const promise = transcribeChunk(chunk, chunkIndex++);
-              transcriptionPromises.push(promise);
+              activePromises.add(promise);
+              promise.finally(() => activePromises.delete(promise));
             }
           }
         };
@@ -147,41 +156,45 @@ export function createVodRouter(stt: STTService) {
 
             try {
               await processPromise;
-              await Promise.all(transcriptionPromises);
+              await Promise.all(activePromises);
 
-              if (pcmBuffer.length > SAMPLE_RATE * BYTES_PER_SAMPLE) {
+              if (!isAborted && pcmBuffer.length > SAMPLE_RATE * BYTES_PER_SAMPLE) {
                 const startTime = chunkIndex * CHUNK_DURATION_S;
                 const durationS = pcmBuffer.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
 
                 console.log(`[VOD] Transcribing final chunk ${chunkIndex} (${startTime}s–${(startTime + durationS).toFixed(1)}s)...`);
                 const result = await stt.transcribe(pcmBuffer, true);
+                
+                if (!isAborted) {
+                  const segments = result.segments?.map(s => ({
+                    start: startTime + s.start,
+                    end: startTime + s.end,
+                    text: s.text
+                  })) || [
+                      {
+                        start: startTime,
+                        end: startTime + durationS,
+                        text: result.text
+                      }
+                    ];
 
-                const segments = result.segments?.map(s => ({
-                  start: startTime + s.start,
-                  end: startTime + s.end,
-                  text: s.text
-                })) || [
-                    {
-                      start: startTime,
-                      end: startTime + durationS,
-                      text: result.text
-                    }
-                  ];
-
-                await stream.writeSSE({
-                  event: 'transcript',
-                  data: JSON.stringify({
-                    index: chunkIndex,
-                    segments,
-                  }),
-                });
-                chunkIndex++;
+                  await stream.writeSSE({
+                    event: 'transcript',
+                    data: JSON.stringify({
+                      index: chunkIndex,
+                      segments,
+                    }),
+                  });
+                  chunkIndex++;
+                }
               }
 
-              await stream.writeSSE({
-                event: 'done',
-                data: JSON.stringify({ totalChunks: chunkIndex }),
-              });
+              if (!isAborted) {
+                await stream.writeSSE({
+                  event: 'done',
+                  data: JSON.stringify({ totalChunks: chunkIndex }),
+                });
+              }
 
               resolve();
             } catch (err) {
@@ -190,6 +203,7 @@ export function createVodRouter(stt: STTService) {
           });
 
           stream.onAbort(() => {
+            isAborted = true;
             killProcesses();
             resolve();
           });

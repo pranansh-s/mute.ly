@@ -51,6 +51,10 @@ export class SocketManager {
     });
 
     ws.on('close', () => {
+      const session = this.sessions.get(ws);
+      if (session) {
+        session.destroy();
+      }
       this.sessions.delete(ws);
       console.log('[WS] Connection closed');
     });
