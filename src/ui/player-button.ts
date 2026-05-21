@@ -1,6 +1,10 @@
+import { YouTubeDOM } from '../core/youtube/youtube-dom';
+import type { MonitorStatus } from '../core/types';
+
 export class PlayerButton {
   private buttonElement: HTMLButtonElement | null = null;
-  private currentStatus: 'idle' | 'audio' | 'error' = 'idle';
+  private currentStatus: MonitorStatus = 'idle';
+  private loadingProgress = 0;
 
   private toggleCallback: () => void;
 
@@ -13,7 +17,7 @@ export class PlayerButton {
       return;
     }
 
-    const container = document.querySelector('.ytp-right-controls');
+    const container = YouTubeDOM.getControlsContainer();
     if (!container) return;
 
     this.buttonElement = document.createElement('button');
@@ -55,14 +59,30 @@ export class PlayerButton {
     this.updateState(this.currentStatus);
   }
 
-  public updateState(status: 'idle' | 'audio' | 'error') {
+  public updateLoadingProgress(progress: number) {
+    this.loadingProgress = progress;
+    if (this.currentStatus === 'loading' && this.buttonElement) {
+      this.buttonElement.setAttribute('title', `Mute.ly Loading model... ${progress}%`);
+    }
+  }
+
+  public updateState(status: MonitorStatus) {
     this.currentStatus = status;
     if (!this.buttonElement) return;
 
     const path = this.buttonElement.querySelector('.mutely-svg-path') as SVGPathElement;
     if (!path) return;
 
-    if (status === 'audio') {
+    this.buttonElement.style.animation = '';
+
+    if (status === 'loading') {
+      path.setAttribute('fill', '#ffa726');
+      this.buttonElement.setAttribute('data-active', 'true');
+      this.buttonElement.style.opacity = '1';
+      this.buttonElement.style.animation = 'mutely-pulse 1.5s ease-in-out infinite';
+      this.buttonElement.setAttribute('title', `Mute.ly Loading model... ${this.loadingProgress}%`);
+      this.injectPulseAnimation();
+    } else if (status === 'audio') {
       path.setAttribute('fill', '#ff4081');
       this.buttonElement.setAttribute('data-active', 'true');
       this.buttonElement.style.opacity = '1';
@@ -78,5 +98,18 @@ export class PlayerButton {
       this.buttonElement.style.opacity = '0.8';
       this.buttonElement.setAttribute('title', 'Mute.ly Captions');
     }
+  }
+
+  private injectPulseAnimation() {
+    if (document.getElementById('mutely-pulse-style')) return;
+    const style = document.createElement('style');
+    style.id = 'mutely-pulse-style';
+    style.textContent = `
+      @keyframes mutely-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+    `;
+    document.head.appendChild(style);
   }
 }
