@@ -66,6 +66,10 @@ chrome.runtime.onMessage.addListener((msg: OffscreenCommand & { _fromBackground?
       worker.postMessage({ type: 'load' });
       break;
     case 'load_aot':
+      // Cancel old stream and flush stale worker state from previous session
+      decoder.cancelStream();
+      pendingTranscribe = null;
+      workerBusy = false;
       decoder.loadStream(msg.url);
       break;
     case 'transcribe_aot':

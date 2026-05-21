@@ -26,7 +26,11 @@ async function ensureOffscreen() {
         justification: 'Whisper transcription'
       });
     }
-  })();
+  })().catch((err) => {
+    // Reset so next attempt can retry
+    creationPromise = null;
+    throw err;
+  });
 
   return creationPromise;
 }

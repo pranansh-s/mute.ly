@@ -13,7 +13,7 @@ export class AudioExtractor {
   private isExtracting = false;
   private vad: MicVAD | null = null;
   private capturedStream: MediaStream | null = null;
-  private windowBuffer!: Float32Array;
+  private windowBuffer: Float32Array | null = null;
   private samplesAccumulated = 0;
   private isSpeechActive = false;
   private stepSizeSamples = 0;
@@ -50,14 +50,14 @@ export class AudioExtractor {
         },
         onSpeechEnd: () => {
           this.isSpeechActive = false;
-          if (this.isExtracting) {
+          if (this.isExtracting && this.windowBuffer) {
             engine.transcribe(new Float32Array(this.windowBuffer));
             engine.onSpeechEnd();
             this.samplesAccumulated = 0;
           }
         },
         onFrameProcessed: ((_probs: any, frame: Float32Array) => {
-          if (!this.isExtracting) return;
+          if (!this.isExtracting || !this.windowBuffer) return;
 
           this.windowBuffer.set(this.windowBuffer.subarray(frame.length));
           this.windowBuffer.set(frame, this.windowBuffer.length - frame.length);

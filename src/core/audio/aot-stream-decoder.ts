@@ -8,6 +8,7 @@ export interface TranscribeAOTRequest {
 export class AotStreamDecoder {
   private aotAudioBuffer: Float32Array | null = null;
   private bufferedSamples = 0;
+  private streamAbort: AbortController | null = null;
   private readonly SAMPLE_RATE = 16000;
 
   constructor(
@@ -18,10 +19,26 @@ export class AotStreamDecoder {
     private readonly onEmptyResult: (id: number) => void
   ) {}
 
+  /** Cancel any in-progress stream fetch and reset buffer state. */
+  public cancelStream() {
+    if (this.streamAbort) {
+      this.streamAbort.abort();
+      this.streamAbort = null;
+    }
+    this.aotAudioBuffer = null;
+    this.bufferedSamples = 0;
+  }
+
   public async loadStream(url: string) {
+    // Cancel any previous stream before starting a new one
+    this.cancelStream();
+
+    const abort = new AbortController();
+    this.streamAbort = abort;
+
     try {
       console.log('[Offscreen] Starting AOT stream fetch:', url);
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: abort.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       if (!response.body) throw new Error('No response body');
 
@@ -36,7 +53,10 @@ export class AotStreamDecoder {
       let leftoverBuffer = new Uint8Array(0);
 
       while (true) {
-        let timeoutId: ReturnType<typeof setTimeout>;
+        // Check abort before each read
+        if (abort.signal.aborted) return;
+
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => reject(new Error('Stream hung (15s timeout)')), 15000);
         });
@@ -45,7 +65,13 @@ export class AotStreamDecoder {
         try {
           readResult = await Promise.race([reader.read(), timeoutPromise]);
         } finally {
-          clearTimeout(timeoutId!);
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
+        }
+
+        // Check abort after read completes
+        if (abort.signal.aborted) {
+          reader.cancel().catch(() => {});
+          return;
         }
         
         const { done, value } = readResult;
@@ -69,22 +95,18 @@ export class AotStreamDecoder {
 
         if (chunk.length === 0) continue;
 
-        let floatView: Float32Array;
-        if (chunk.byteOffset % 4 === 0) {
-          floatView = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.length / 4);
-        } else {
-          const alignedChunk = new Uint8Array(chunk);
-          floatView = new Float32Array(alignedChunk.buffer, alignedChunk.byteOffset, alignedChunk.length / 4);
-        }
+        // Always copy into an aligned buffer to avoid DataView alignment issues
+        const alignedChunk = new Uint8Array(chunk);
+        const floatView = new Float32Array(alignedChunk.buffer, alignedChunk.byteOffset, alignedChunk.length / 4);
         
         if (this.bufferedSamples + floatView.length > capacity) {
           capacity = capacity * 2;
           const newBuffer = new Float32Array(capacity);
-          newBuffer.set(this.aotAudioBuffer);
+          newBuffer.set(this.aotAudioBuffer!);
           this.aotAudioBuffer = newBuffer;
         }
         
-        this.aotAudioBuffer.set(floatView, this.bufferedSamples);
+        this.aotAudioBuffer!.set(floatView, this.bufferedSamples);
         this.bufferedSamples += floatView.length;
 
         const bufferedSeconds = this.bufferedSamples / this.SAMPLE_RATE;
@@ -95,22 +117,29 @@ export class AotStreamDecoder {
         }
       }
 
-      this.aotAudioBuffer = this.aotAudioBuffer.slice(0, this.bufferedSamples);
+      // Stream completed naturally — only finalize if not aborted
+      if (abort.signal.aborted) return;
+
+      this.aotAudioBuffer = this.aotAudioBuffer!.slice(0, this.bufferedSamples);
       const totalDuration = this.bufferedSamples / this.SAMPLE_RATE;
       
       console.log(`[Offscreen] Stream complete: ${totalDuration.toFixed(2)}s`);
       this.onReady(totalDuration);
       
     } catch (err: unknown) {
+      // Aborted streams are not errors
+      if (abort.signal.aborted) return;
+
       const message = err instanceof Error ? err.message : 'Unknown error';
       console.error('[Offscreen] AOT Stream Error:', err);
       this.aotAudioBuffer = null;
+      this.bufferedSamples = 0;
       this.onError(`Audio stream failed: ${message}`);
     }
   }
 
   public transcribeSlice(data: TranscribeAOTRequest) {
-    if (!this.aotAudioBuffer) {
+    if (!this.aotAudioBuffer || this.bufferedSamples === 0) {
       this.onEmptyResult(data.id);
       return;
     }

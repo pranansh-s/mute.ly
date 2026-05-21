@@ -39,9 +39,11 @@ class YouTubeMonitor {
 
       if (videoId && videoId !== this.currentVideoId) {
         this.currentVideoId = videoId;
-        if (this.isRunning) {
+        if (this.isRunning && !this.isStartingPipeline) {
+          this.isStartingPipeline = true;
           this.setStatus('idle');
           await this.stopProcessing();
+          this.isStartingPipeline = false;
           await this.startProcessing();
         }
         this.subtitleOverlay.clear();
@@ -159,7 +161,7 @@ class YouTubeMonitor {
       
       const { title, advice } = mapErrorToUI(error);
       this.errorOverlay.showError(title, advice);
-      
+    } finally {
       this.isStartingPipeline = false;
     }
   }

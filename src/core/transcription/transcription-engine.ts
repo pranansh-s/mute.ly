@@ -15,6 +15,7 @@ export class TranscriptionEngine {
   private isProcessing = false;
   private lastText = '';
   private pendingVideoElement: HTMLVideoElement | null = null;
+  private speechEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   public onStatusChange?: (status: ModelStatus) => void;
   public onLoadProgress?: (progress: number) => void;
@@ -76,13 +77,23 @@ export class TranscriptionEngine {
       this.onCaption(this.lastText, false);
       this.lastText = '';
     }
-    setTimeout(() => this.onCaption('', false), 2000);
+    this.speechEndTimer = setTimeout(() => {
+      this.speechEndTimer = null;
+      this.onCaption('', false);
+    }, 2000);
   }
 
   public destroy() {
+    if (this.speechEndTimer) {
+      clearTimeout(this.speechEndTimer);
+      this.speechEndTimer = null;
+    }
     this.client.destroy();
     this.aotPipeline.destroy();
+    this.isReady = false;
     this.isProcessing = false;
     this.aotMode = false;
+    this.pendingVideoElement = null;
+    this.lastText = '';
   }
 }

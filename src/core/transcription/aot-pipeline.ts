@@ -31,6 +31,7 @@ export class AotPipeline {
 
   /** AbortController for the current drain loop — aborted on seek/destroy. */
   private drainController: AbortController | null = null;
+  private drainGeneration = 0;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private renderTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -105,7 +106,12 @@ export class AotPipeline {
     const neededChunks = new Set<number>();
 
     for (let i = targetChunk; i <= Math.min(targetChunk + LOOKAHEAD, this.totalChunks - 1); i++) {
-      if (i >= 0 && !this.completedChunks.has(i)) {
+      if (i < 0) continue;
+      // Only consider chunks whose audio is actually buffered
+      const chunkEndTime = (i + 1) * CHUNK_STRIDE;
+      if (chunkEndTime > this.bufferedDuration) break;
+
+      if (!this.completedChunks.has(i)) {
         neededChunks.add(i);
       }
     }
@@ -141,6 +147,7 @@ export class AotPipeline {
 
   /** Aborts the current drain loop and any in-flight transcription. */
   private abortDrain() {
+    this.drainGeneration++;
     if (this.drainController) {
       this.drainController.abort();
       this.drainController = null;
@@ -151,8 +158,9 @@ export class AotPipeline {
   /** Creates a fresh AbortController and starts draining the queue. */
   private startDrain() {
     if (this.isProcessing) return;
+    const gen = ++this.drainGeneration;
     this.drainController = new AbortController();
-    this.drainQueue(this.drainController.signal);
+    this.drainQueue(this.drainController.signal, gen);
   }
 
   private renderCaptions() {
@@ -190,7 +198,7 @@ export class AotPipeline {
     }
   }
 
-  private async drainQueue(signal: AbortSignal) {
+  private async drainQueue(signal: AbortSignal, generation: number) {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
@@ -199,14 +207,16 @@ export class AotPipeline {
       this.inFlightChunk = chunkIndex;
       await this.requestChunk(chunkIndex, signal);
 
-      if (!signal.aborted) {
-        this.inFlightChunk = null;
-        this.completedChunks.add(chunkIndex);
-        this.captionsSorted = false;
-      }
+      // After await, verify we're still the active drain
+      if (signal.aborted || generation !== this.drainGeneration) break;
+
+      this.inFlightChunk = null;
+      this.completedChunks.add(chunkIndex);
+      this.captionsSorted = false;
     }
 
-    if (this.drainController?.signal === signal || !this.drainController) {
+    // Only the active generation clears the processing flag
+    if (generation === this.drainGeneration) {
       this.isProcessing = false;
     }
   }

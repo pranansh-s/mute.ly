@@ -1,6 +1,7 @@
 import type { ModelStatus, OffscreenEvent, TranscriptionResult } from '../types';
 
 const AOT_CHUNK_TIMEOUT_MS = 300_000;
+const JIT_TIMEOUT_MS = 60_000;
 
 export class OffscreenClient {
   private messageId = 0;
@@ -28,7 +29,16 @@ export class OffscreenClient {
   public async transcribeJIT(audio: Float32Array): Promise<TranscriptionResult> {
     const id = this.messageId++;
     return new Promise<TranscriptionResult>((resolve) => {
-      this.pendingResults.set(id, resolve);
+      const timer = setTimeout(() => {
+        this.pendingResults.delete(id);
+        resolve({ text: '' });
+      }, JIT_TIMEOUT_MS);
+
+      this.pendingResults.set(id, (result) => {
+        clearTimeout(timer);
+        this.pendingResults.delete(id);
+        resolve(result);
+      });
       this.sendToOffscreen({ type: 'transcribe', audio: Array.from(audio), id });
     });
   }

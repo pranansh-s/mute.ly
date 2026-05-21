@@ -28,7 +28,12 @@ function reportProgress(progress) {
 }
 
 async function loadModel() {
-  if (transcriber || isLoading) return;
+  if (transcriber) {
+    // Model already loaded — re-send ready so the new client picks it up
+    self.postMessage({ type: 'ready' });
+    return;
+  }
+  if (isLoading) return;
   isLoading = true;
   self.postMessage({ type: 'loading', progress: 0 });
 

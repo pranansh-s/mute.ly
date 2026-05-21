@@ -29,6 +29,10 @@ function handleAudioProxy(req, res) {
   // Pipe yt-dlp stdout to ffmpeg stdin
   ytDlp.stdout.pipe(ffmpeg.stdin);
 
+  // Drain stderr to prevent pipe buffer blocking
+  ytDlp.stderr.pipe(process.stderr);
+  ffmpeg.stderr.pipe(process.stderr);
+
   // Set appropriate headers for raw binary stream
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Transfer-Encoding', 'chunked');
