@@ -6,8 +6,8 @@
  * Offscreen → Background → Content (via tabs.sendMessage)
  */
 
-let activeTabId: number | null = null;
 let creationPromise: Promise<void> | null = null;
+const activeTabs = new Set<number>();
 
 async function ensureOffscreen() {
   if (creationPromise) return creationPromise;
@@ -38,19 +38,25 @@ async function ensureOffscreen() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Messages FROM offscreen worker (loading, ready, result, error)
   if (msg._fromOffscreen) {
-    if (activeTabId !== null) {
-      chrome.tabs.sendMessage(activeTabId, msg).catch(() => {});
+    if (msg.tabId) {
+      chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
+    } else {
+      // Broadcast global events (like loading/ready) to all known active tabs
+      for (const tabId of activeTabs) {
+        chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+      }
     }
     return;
   }
 
   // Messages FROM content script (target: offscreen)
   if (msg.target === 'offscreen') {
-    activeTabId = sender.tab?.id ?? activeTabId;
+    const tabId = sender.tab?.id;
+    if (tabId) activeTabs.add(tabId);
 
     ensureOffscreen().then(() => {
-      // Forward the inner data to all extension pages (offscreen will catch it)
-      chrome.runtime.sendMessage({ ...msg.data, _fromBackground: true }).catch(() => {});
+      // Forward the inner data to offscreen, attaching the source tabId
+      chrome.runtime.sendMessage({ ...msg.data, _fromBackground: true, tabId }).catch(() => {});
     });
 
     sendResponse({ ok: true });

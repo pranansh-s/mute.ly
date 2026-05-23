@@ -3,6 +3,7 @@ export interface TranscribeAOTRequest {
   startTime: number;
   endTime: number;
   return_timestamps: boolean;
+  tabId?: number;
 }
 
 export class AotStreamDecoder {

@@ -3,9 +3,6 @@ export interface UIErrorData {
   advice: string;
 }
 
-/**
- * Maps arbitrary thrown errors to user-friendly UI error configurations.
- */
 export function mapErrorToUI(error: unknown): UIErrorData {
   const errMsg = error instanceof Error ? error.message : String(error);
 
@@ -15,7 +12,7 @@ export function mapErrorToUI(error: unknown): UIErrorData {
       advice: 'Could not find a valid video on this page to transcribe.'
     };
   }
-  
+
   if (errMsg.includes('Permission denied') || errMsg.includes('Requested device not found')) {
     return {
       title: 'Microphone Access Denied',

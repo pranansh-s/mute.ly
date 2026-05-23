@@ -17,6 +17,8 @@ env.backends.onnx.wasm.wasmPaths = location.origin + '/assets/';
 
 let transcriber = null;
 let isLoading = false;
+let abortCurrentChunk = false;
+let currentProcessingId: number | null = null;
 
 function reportProgress(progress) {
   if (progress.status === 'progress' && progress.total) {
@@ -58,29 +60,47 @@ async function loadModel() {
 }
 
 self.onmessage = async (e) => {
-  const { type, audio, id } = e.data;
+  const { type, audio, id, tabId } = e.data;
 
   if (type === 'load') {
     await loadModel();
     return;
   }
 
+  if (type === 'abort_chunk') {
+    if (id === currentProcessingId) {
+      abortCurrentChunk = true;
+    }
+    return;
+  }
+
   if (type === 'transcribe') {
+    abortCurrentChunk = false;
+    currentProcessingId = id;
     if (!transcriber) await loadModel();
     if (!transcriber) {
-      self.postMessage({ type: 'result', id, result: { text: '' } });
+      self.postMessage({ type: 'result', id, tabId, result: { text: '' } });
       return;
     }
 
     try {
       const result = await transcriber(new Float32Array(audio), {
         max_new_tokens: 256,
-        ...(e.data.return_timestamps ? { return_timestamps: true } : {})
+        ...(e.data.return_timestamps ? { return_timestamps: true } : {}),
+        callback_function: () => {
+          if (abortCurrentChunk) {
+            throw new Error('ABORTED');
+          }
+        }
       });
-      self.postMessage({ type: 'result', id, result });
-    } catch (err) {
-      console.error('[WhisperWorker] Transcription error:', err);
-      self.postMessage({ type: 'result', id, result: { text: '' } });
+      self.postMessage({ type: 'result', id, tabId, result });
+    } catch (err: any) {
+      if (err.message === 'ABORTED') {
+        self.postMessage({ type: 'result', id, tabId, result: { dropped: true } });
+      } else {
+        console.error('[WhisperWorker] Transcription error:', err);
+        self.postMessage({ type: 'result', id, tabId, result: { text: '' } });
+      }
     }
   }
 };

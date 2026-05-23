@@ -82,19 +82,27 @@ sequenceDiagram
     BG-->>CS: Relay aot_buffer_progress
     
     loop Chunks queued around playback (poll every 500ms)
-        CS->>BG: {type: transcribe_aot, start, end, id}
+        CS->>BG: {type: transcribe_aot, start, end, id, tabId}
         BG->>OD: Relay
-        Note over OD: Slice buffer, RMS silence check
-        OD->>WW: Transcribe (if not silent)
-        WW-->>OD: {type: result, timestamps + text}
-        OD-->>BG: Relay result
+        OD->>OD: Enqueue in pendingTranscribeQueue
+        Note over OD: Worker handles requests sequentially
+        OD->>WW: Transcribe (if worker idle)
+        WW-->>OD: {type: result, timestamps + text, tabId}
+        OD-->>BG: Route result to requesting tabId
         BG-->>CS: Store timestamped captions
     end
 
     Note over CS: Render loop (20fps): binary search captions by video.currentTime
     CS->>YT: Display matching caption
-    Note over CS: On seek: abort in-flight chunks, re-queue around new position
+    Note over CS: On seek: AotPipeline prioritizes urgent chunks, aborts stale lookaheads, and auto-recovers failures
 ```
+
+#### Pipeline Resilience & Auto-Recovery
+The VOD chunking architecture features robust self-healing mechanisms:
+- **Resilient Worker Queueing**: If multiple chunks are requested simultaneously, the `Offscreen Document` safely queues them rather than silently dropping/overwriting active requests.
+- **Urgency-Aware Seeking**: When scrubbing the seekbar, the `AotPipeline` intelligently detaches from stale "lookahead" chunks and instantly pivots the worker to the chunk you're currently watching, preventing seek lag.
+- **Tab Isolation**: Message payloads are tagged with `tabId`, ensuring that if you have multiple YouTube tabs open, each tab's captions are routed exclusively to its own video player.
+- **Failure Recovery**: If a Whisper worker crashes or a transcription chunk times out, the pipeline safely catches the error and relies on the 500ms polling loop to automatically detect the missing chunk and retry it.
 
 ### Component Breakdown
 

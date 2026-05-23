@@ -180,4 +180,7 @@ class YouTubeMonitor {
   }
 }
 
-new YouTubeMonitor();
+if (!(window as any).__MUTE_LY_INJECTED) {
+  (window as any).__MUTE_LY_INJECTED = true;
+  new YouTubeMonitor();
+}

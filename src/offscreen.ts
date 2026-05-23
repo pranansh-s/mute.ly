@@ -15,15 +15,14 @@ function send(msg: OffscreenEvent) {
 }
 
 let workerBusy = false;
-let pendingTranscribe: any = null;
+let pendingTranscribeQueue: any[] = [];
 
 worker.onmessage = (e) => {
   if (e.data.type === 'result') {
     workerBusy = false;
     send(e.data);
-    if (pendingTranscribe) {
-      const req = pendingTranscribe;
-      pendingTranscribe = null;
+    if (pendingTranscribeQueue.length > 0) {
+      const req = pendingTranscribeQueue.shift();
       workerBusy = true;
       worker.postMessage(req);
     }
@@ -48,7 +47,7 @@ const decoder = new AotStreamDecoder(
       return_timestamps: request.return_timestamps
     };
     if (workerBusy) {
-      pendingTranscribe = req;
+      pendingTranscribeQueue.push(req);
     } else {
       workerBusy = true;
       worker.postMessage(req);
@@ -65,10 +64,29 @@ chrome.runtime.onMessage.addListener((msg: OffscreenCommand & { _fromBackground?
       console.log('[Offscreen] Loading model...');
       worker.postMessage({ type: 'load' });
       break;
+    case 'cancel_requests': {
+      const cancelSet = new Set(msg.ids);
+      
+      // Filter out cancelled requests from the queue and send dropped results
+      const newQueue = [];
+      for (const pending of pendingTranscribeQueue) {
+        if (cancelSet.has(pending.id)) {
+          send({ type: 'result', id: pending.id, tabId: pending.tabId, result: { dropped: true } });
+        } else {
+          newQueue.push(pending);
+        }
+      }
+      pendingTranscribeQueue = newQueue;
+
+      for (const id of msg.ids) {
+        worker.postMessage({ type: 'abort_chunk', id });
+      }
+      break;
+    }
     case 'load_aot':
       // Cancel old stream and flush stale worker state from previous session
       decoder.cancelStream();
-      pendingTranscribe = null;
+      pendingTranscribeQueue = [];
       workerBusy = false;
       decoder.loadStream(msg.url);
       break;
@@ -77,7 +95,7 @@ chrome.runtime.onMessage.addListener((msg: OffscreenCommand & { _fromBackground?
       break;
     case 'transcribe':
       if (workerBusy) {
-        pendingTranscribe = msg;
+        pendingTranscribeQueue.push(msg);
       } else {
         workerBusy = true;
         worker.postMessage(msg);

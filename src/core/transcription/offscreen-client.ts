@@ -26,6 +26,15 @@ export class OffscreenClient {
     this.sendToOffscreen({ type: 'load_aot', url });
   }
 
+  public cancelRequests(ids: number[]) {
+    for (const id of ids) {
+      const resolve = this.pendingResults.get(id);
+      if (resolve) resolve({ dropped: true });
+      this.pendingResults.delete(id);
+    }
+    this.sendToOffscreen({ type: 'cancel_requests', ids });
+  }
+
   public async transcribeJIT(audio: Float32Array): Promise<TranscriptionResult> {
     const id = this.messageId++;
     return new Promise<TranscriptionResult>((resolve) => {
@@ -43,45 +52,36 @@ export class OffscreenClient {
     });
   }
 
-  public async transcribeAOT(startTime: number, endTime: number, signal?: AbortSignal): Promise<TranscriptionResult> {
-    if (signal?.aborted) return { text: '' };
-
+  public transcribeAOT(startTime: number, endTime: number): { id: number; promise: Promise<TranscriptionResult> } {
     const id = this.messageId++;
 
-    try {
-      return await new Promise<TranscriptionResult>((resolve, reject) => {
-        let settled = false;
-        const settle = (result: TranscriptionResult) => {
-          if (settled) return;
+    const promise = new Promise<TranscriptionResult>((resolve) => {
+      let settled = false;
+      const settle = (result: TranscriptionResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingResults.delete(id);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        if (!settled) {
           settled = true;
-          clearTimeout(timer);
           this.pendingResults.delete(id);
-          signal?.removeEventListener('abort', onAbort);
-          resolve(result);
-        };
+          this.cancelRequests([id]);
+          resolve({ dropped: true });
+        }
+      }, AOT_CHUNK_TIMEOUT_MS);
 
-        const timer = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            this.pendingResults.delete(id);
-            signal?.removeEventListener('abort', onAbort);
-            reject(new Error('TIMEOUT'));
-          }
-        }, AOT_CHUNK_TIMEOUT_MS);
+      this.pendingResults.set(id, settle);
 
-        const onAbort = () => settle({ text: '' });
-        signal?.addEventListener('abort', onAbort);
-
-        this.pendingResults.set(id, (result) => settle(result));
-
-        this.sendToOffscreen({
-          type: 'transcribe_aot', startTime, endTime, id, return_timestamps: true,
-        });
+      this.sendToOffscreen({
+        type: 'transcribe_aot', startTime, endTime, id, return_timestamps: true,
       });
-    } catch (err: unknown) {
-      console.warn(`[Mute.ly Engine] Chunk failed or timed out permanently.`);
-      return { text: '' };
-    }
+    });
+
+    return { id, promise };
   }
 
   private handleMessage = (msg: OffscreenEvent & { _fromOffscreen?: boolean }) => {
