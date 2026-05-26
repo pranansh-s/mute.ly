@@ -4,8 +4,9 @@ import { TranscriptionEngine } from '../transcription/transcription-engine';
 const TARGET_SAMPLE_RATE = 16000;
 const PLAY_WAIT_TIMEOUT_MS = 10000;
 
-const LIVE_WINDOW_S = 2.5;
+const LIVE_WINDOW_S = 3.0;
 const LIVE_STEP_S = 0.5;
+const MIN_LIVE_SPEECH_S = 0.0;
 
 const EXTENSION_ASSET_URL = chrome.runtime.getURL('assets/');
 
@@ -15,19 +16,18 @@ export class AudioExtractor {
   private capturedStream: MediaStream | null = null;
   private windowBuffer: Float32Array | null = null;
   private samplesAccumulated = 0;
+  private speechSamplesAccumulated = 0;
   private isSpeechActive = false;
   private stepSizeSamples = 0;
+  private minSpeechSamples = 0;
 
-  /**
-   * Starts live audio extraction from the given video element.
-   * The caller is responsible for providing a valid, attached video element.
-   */
   async startExtraction(engine: TranscriptionEngine, videoElement: HTMLVideoElement): Promise<void> {
     if (this.isExtracting) return;
     this.isExtracting = true;
 
     this.windowBuffer = new Float32Array(TARGET_SAMPLE_RATE * LIVE_WINDOW_S);
     this.stepSizeSamples = TARGET_SAMPLE_RATE * LIVE_STEP_S;
+    this.minSpeechSamples = TARGET_SAMPLE_RATE * MIN_LIVE_SPEECH_S;
 
     try {
       if (videoElement.paused) {
@@ -47,23 +47,31 @@ export class AudioExtractor {
         getStream: async () => stream,
         onSpeechStart: () => {
           this.isSpeechActive = true;
+          this.samplesAccumulated = 0;
+          this.speechSamplesAccumulated = 0;
+          engine.onSpeechStart();
         },
         onSpeechEnd: () => {
           this.isSpeechActive = false;
-          if (this.isExtracting && this.windowBuffer) {
+          if (this.isExtracting && this.windowBuffer && this.speechSamplesAccumulated >= this.minSpeechSamples) {
             engine.transcribe(new Float32Array(this.windowBuffer));
             engine.onSpeechEnd();
             this.samplesAccumulated = 0;
           }
+          this.speechSamplesAccumulated = 0;
         },
         onFrameProcessed: ((_probs: any, frame: Float32Array) => {
           if (!this.isExtracting || !this.windowBuffer) return;
 
           this.windowBuffer.set(this.windowBuffer.subarray(frame.length));
           this.windowBuffer.set(frame, this.windowBuffer.length - frame.length);
-          this.samplesAccumulated += frame.length;
 
-          if (this.samplesAccumulated >= this.stepSizeSamples && this.isSpeechActive) {
+          if (!this.isSpeechActive) return;
+
+          this.samplesAccumulated += frame.length;
+          this.speechSamplesAccumulated += frame.length;
+
+          if (this.samplesAccumulated >= this.stepSizeSamples && this.speechSamplesAccumulated >= this.minSpeechSamples) {
             engine.transcribe(new Float32Array(this.windowBuffer));
             this.samplesAccumulated = 0;
           }
@@ -95,6 +103,7 @@ export class AudioExtractor {
       this.windowBuffer.fill(0);
     }
     this.samplesAccumulated = 0;
+    this.speechSamplesAccumulated = 0;
     this.isSpeechActive = false;
   }
 
@@ -118,12 +127,14 @@ export class AudioExtractor {
 
   private waitForVideoPlay(videoElement: HTMLVideoElement): Promise<void> {
     return new Promise((resolve) => {
+      let timeoutId: ReturnType<typeof setTimeout>;
       const onPlay = () => {
         videoElement.removeEventListener('play', onPlay);
+        clearTimeout(timeoutId);
         resolve();
       };
       videoElement.addEventListener('play', onPlay);
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         videoElement.removeEventListener('play', onPlay);
         resolve();
       }, PLAY_WAIT_TIMEOUT_MS);

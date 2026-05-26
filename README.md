@@ -19,7 +19,7 @@ The system is split into the **Chrome Extension** (UI + AI inference) and a **Lo
 
 ### Live Stream Pipeline
 
-In live mode, the Content Script captures tab audio via `captureStream()`, runs Voice Activity Detection locally (Silero VAD v5), and sends 2.5-second sliding windows of audio to the Offscreen Document for transcription.
+In live mode, the Content Script captures tab audio via `captureStream()`, runs Voice Activity Detection locally (Silero VAD v5), and sends the latest 3.0-second speech window to the Offscreen Document for transcription.
 
 ```mermaid
 sequenceDiagram
@@ -32,13 +32,13 @@ sequenceDiagram
     CS->>YT: Inject UI (Button & Overlay)
     CS->>BG: {type: load}
     BG->>OD: Relay (ensureOffscreen)
-    OD->>WW: Load whisper-base.en model
+    OD->>WW: Load whisper-tiny.en model
     WW-->>OD: Model ready
     OD-->>BG: {type: ready}
     BG-->>CS: Relay ready
 
     CS->>YT: captureStream() → VAD
-    loop On Speech (2.5s sliding window, 0.5s step)
+    loop On Speech (3.0s latest window, 0.5s step)
         CS->>BG: {type: transcribe, audio: Float32[]}
         BG->>OD: Relay
         OD->>WW: Transcribe chunk
@@ -72,44 +72,56 @@ sequenceDiagram
     OD-->>BG: {type: ready}
     BG-->>CS: Relay ready
 
-    CS->>BG: {type: load_aot, url}
+    CS->>BG: {type: load_aot, url, clientId}
     BG->>OD: Relay load_aot
     OD->>Srv: fetch(/api/audio-proxy?videoId=...)
     Note over Srv: yt-dlp | ffmpeg raw f32le PCM
     Srv-->>OD: Streaming raw PCM response
-    Note over OD: Read ReadableStream chunks → Float32 buffer
+    Note over OD: Read ReadableStream chunks → chunked PCM store
     OD-->>BG: {type: aot_buffer_progress, bufferedSeconds}
     BG-->>CS: Relay aot_buffer_progress
     
-    loop Chunks queued around playback (poll every 500ms)
-        CS->>BG: {type: transcribe_aot, start, end, id, tabId}
+    loop Current chunk + lookahead around playback
+        CS->>BG: {type: transcribe_aot, start, end, id, clientId}
         BG->>OD: Relay
-        OD->>OD: Enqueue in pendingTranscribeQueue
-        Note over OD: Worker handles requests sequentially
-        OD->>WW: Transcribe (if worker idle)
-        WW-->>OD: {type: result, timestamps + text, tabId}
+        Note over OD: Single worker gate serializes Whisper jobs
+        OD->>WW: Transcribe active job
+        WW-->>OD: {type: result, timestamps + text, tabId, clientId}
         OD-->>BG: Route result to requesting tabId
         BG-->>CS: Store timestamped captions
     end
 
-    Note over CS: Render loop (20fps): binary search captions by video.currentTime
+    Note over CS: Render loop (20fps): lookup cached captions by video.currentTime
     CS->>YT: Display matching caption
-    Note over CS: On seek: AotPipeline prioritizes urgent chunks, aborts stale lookaheads, and auto-recovers failures
+    Note over CS: On seek: reconcile pending chunks, keep useful active work, continue sequentially
 ```
 
-#### Pipeline Resilience & Auto-Recovery
-The VOD chunking architecture features robust self-healing mechanisms:
-- **Resilient Worker Queueing**: If multiple chunks are requested simultaneously, the `Offscreen Document` safely queues them rather than silently dropping/overwriting active requests.
-- **Urgency-Aware Seeking**: When scrubbing the seekbar, the `AotPipeline` intelligently detaches from stale "lookahead" chunks and instantly pivots the worker to the chunk you're currently watching, preventing seek lag.
-- **Tab Isolation**: Message payloads are tagged with `tabId`, ensuring that if you have multiple YouTube tabs open, each tab's captions are routed exclusively to its own video player.
-- **Failure Recovery**: If a Whisper worker crashes or a transcription chunk times out, the pipeline safely catches the error and relies on the 500ms polling loop to automatically detect the missing chunk and retry it.
+#### VOD Queue Contract
+The VOD chunking architecture is intentionally simple and deterministic:
+
+- **One AOT Queue Owner**: `AotPipeline` is the only component that decides which VOD chunks to process. It enqueues the current playback chunk plus a small lookahead window.
+- **Seek Handling**: Seeking reconciles the pending queue against the new playback window. Useful active work is not aborted, and unchanged nearby queues are preserved.
+- **Sequential Processing**: Only one AOT chunk request is active from the content script at a time. `OffscreenClient` rejects accidental overlapping AOT requests instead of overriding an in-flight promise.
+- **Worker Gate Only**: The Offscreen Document owns the physical Whisper worker and serializes jobs, but it does not reprioritize AOT chunks. Scheduling stays in `AotPipeline`.
+- **Deterministic Cache Reuse**: Completed chunks are cached by stable chunk index. Seeking backward into cached regions restores captions immediately without retranscription.
+- **Timing Stability**: Timestamped Whisper output is clamped to the chunk ownership window, adjacent duplicate captions are merged, and a small display grace reduces seam flicker at chunk boundaries.
+
+#### Production Resilience
+- **No Seek-Time Worker Poisoning**: Normal seeks never send abort messages to the worker. Old active work can finish cleanly and be reused later.
+- **Bounded Caption Cache**: A small LRU cache keeps processed chunks reusable while preventing unbounded long-session growth.
+- **Chunked PCM Storage**: VOD PCM audio is stored as streamed chunks in the Offscreen Document instead of one repeatedly reallocated giant buffer.
+- **Client/Tab Isolation**: Message payloads carry tab and client ownership metadata so old tabs or replaced clients cannot commit captions into the wrong player.
+- **Reliable Model Reuse**: The Offscreen Document tracks whether the model is idle, loading, or ready. Already-loaded models are reused immediately, duplicate load requests attach to the active load, and stalled loads restart the Whisper worker instead of leaving the UI in loading forever.
+- **Retryable Chunk Failures**: Temporarily unavailable audio ranges and worker transcription failures return `dropped: true`, so the AOT cache only stores successful chunk outcomes. Revisiting a failed/dequeued chunk can request it again cleanly.
+- **Dropped Chunk Deferral**: Dropped chunks are not cached and are deferred briefly before retry so the queue avoids tight retry loops. Explicit seeks clear the deferral so returning to an incomplete chunk can retry immediately.
+- **Lower-Latency Live Captions**: Live mode uses a shorter latest-window path and keeps only the newest pending live audio window while Whisper is busy, reducing stale live captions without overlapping workers.
 
 ### Component Breakdown
 
 1. **Content Script (`src/content.ts`)**: Monitors the YouTube player, injects UI, and orchestrates the pipeline based on the video type (live vs VOD).
 2. **Local Express Server (`server/`)**: Bypasses browser CORS limitations by using `yt-dlp` to download and serve the highest quality audio track. Only used for VODs.
 3. **Background Service Worker (`src/background.ts`)**: Stateless message relay between Content Script and Offscreen Document. Also manages the Offscreen Document lifecycle.
-4. **Offscreen Document (`src/offscreen.ts`)**: A hidden DOM environment that fetches and decodes VOD audio into a PCM buffer, and forwards audio chunks to the Whisper Worker. This is the only component that can use `OfflineAudioContext` (not available in service workers or content scripts).
+4. **Offscreen Document (`src/offscreen.ts`)**: A hidden DOM environment that fetches VOD audio into a chunked PCM store, slices requested ranges, and forwards audio chunks to the Whisper Worker.
 5. **Whisper Web Worker (`src/whisper-worker.ts`)**: Runs `Transformers.js` (Whisper-base.en, ONNX q8) in a background thread for non-blocking WASM inference.
 
 ## Getting Started
@@ -173,7 +185,8 @@ npm run clean && npm run build
 │   ├── core/
 │   │   ├── types.ts            # Shared types: MonitorStatus, message protocol unions
 │   │   ├── audio/
-│   │   │   └── audio-extractor.ts    # Live audio capture via VAD + captureStream
+│   │   │   ├── audio-extractor.ts    # Live audio capture via VAD + captureStream
+│   │   │   └── aot-stream-decoder.ts # VOD PCM stream buffering and slice extraction
 │   │   ├── transcription/
 │   │   │   ├── transcription-engine.ts  # Orchestrator: routes to JIT or AOT pipeline
 │   │   │   ├── offscreen-client.ts      # Chrome messaging client for offscreen document
@@ -190,12 +203,20 @@ npm run clean && npm run build
 
 | Component | Detail |
 |---|---|
-| **Model** | `onnx-community/whisper-base.en` (ONNX, quantized q8) |
+| **Models** | Live: `onnx-community/whisper-tiny.en`; VOD: `onnx-community/whisper-base.en` (ONNX, quantized q8) |
 | **Inference** | Transformers.js v4, single-threaded WASM |
-| **Live Audio** | VAD (Silero v5) → 2.5s sliding window, 0.5s step |
+| **Live Audio** | VAD (Silero v5) → 3.0s latest window, 0.5s step |
 | **VOD Audio** | AOT decoding via local proxy → seek-aware 30s chunk slicing (25s stride) |
 | **Sample Rate** | 16kHz mono Float32 |
 | **Permissions** | `offscreen` |
+
+## Testing
+
+Build the extension:
+
+```bash
+npm run build
+```
 
 ---
 

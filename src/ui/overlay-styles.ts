@@ -14,7 +14,7 @@ export const BASE_CONTAINER_STYLE: Partial<CSSStyleDeclaration> = {
   width: '80%',
   textAlign: 'center',
   pointerEvents: 'none',
-  transition: 'opacity 0.2s ease-in-out',
+  transition: 'opacity 0.35s ease-in-out',
   opacity: '0',
 };
 

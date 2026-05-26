@@ -8,6 +8,7 @@
 
 let creationPromise: Promise<void> | null = null;
 const activeTabs = new Set<number>();
+const GLOBAL_EVENT_TYPES = new Set(['loading', 'ready', 'error']);
 
 async function ensureOffscreen() {
   if (creationPromise) return creationPromise;
@@ -26,24 +27,42 @@ async function ensureOffscreen() {
         justification: 'Whisper transcription'
       });
     }
-  })().catch((err) => {
-    // Reset so next attempt can retry
-    creationPromise = null;
-    throw err;
-  });
+  })();
 
-  return creationPromise;
+  try {
+    await creationPromise;
+  } finally {
+    // Re-check the actual offscreen context on the next wake/use. A resolved
+    // promise can outlive Chrome's offscreen document lifecycle.
+    creationPromise = null;
+  }
+}
+
+async function forwardToOffscreen(data: Record<string, unknown>, tabId?: number) {
+  const payload = { ...data, _fromBackground: true, tabId };
+
+  await ensureOffscreen();
+  try {
+    await chrome.runtime.sendMessage(payload);
+  } catch {
+    await ensureOffscreen();
+    await chrome.runtime.sendMessage(payload);
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Messages FROM offscreen worker (loading, ready, result, error)
   if (msg._fromOffscreen) {
-    if (msg.tabId) {
-      chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
-    } else {
+    if (typeof msg.tabId === 'number') {
+      chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {
+        activeTabs.delete(msg.tabId);
+      });
+    } else if (GLOBAL_EVENT_TYPES.has(msg.type)) {
       // Broadcast global events (like loading/ready) to all known active tabs
       for (const tabId of activeTabs) {
-        chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+        chrome.tabs.sendMessage(tabId, msg).catch(() => {
+          activeTabs.delete(tabId);
+        });
       }
     }
     return;
@@ -52,14 +71,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Messages FROM content script (target: offscreen)
   if (msg.target === 'offscreen') {
     const tabId = sender.tab?.id;
-    if (tabId) activeTabs.add(tabId);
+    if (typeof tabId === 'number') activeTabs.add(tabId);
 
-    ensureOffscreen().then(() => {
-      // Forward the inner data to offscreen, attaching the source tabId
-      chrome.runtime.sendMessage({ ...msg.data, _fromBackground: true, tabId }).catch(() => {});
-    });
+    forwardToOffscreen(msg.data, tabId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => {
+        console.error('[Mute.ly Background] Failed to forward message to offscreen:', error);
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
 
-    sendResponse({ ok: true });
-    return;
+    return true;
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  activeTabs.delete(tabId);
 });

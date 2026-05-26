@@ -15,55 +15,86 @@ env.backends.onnx.wasm.numThreads = 1;
 env.backends.onnx.wasm.proxy = false;
 env.backends.onnx.wasm.wasmPaths = location.origin + '/assets/';
 
-let transcriber = null;
-let isLoading = false;
-let abortCurrentChunk = false;
-let currentProcessingId: number | null = null;
+const MODEL_BY_KIND = {
+  tiny: 'onnx-community/whisper-tiny.en',
+  base: 'onnx-community/whisper-base.en',
+};
 
-function reportProgress(progress) {
-  if (progress.status === 'progress' && progress.total) {
-    self.postMessage({
-      type: 'loading',
-      progress: Math.round((progress.loaded / progress.total) * 100),
-    });
-  }
+const transcribers = new Map();
+const loadPromises = new Map();
+const lastLoadProgressByModel = new Map();
+let currentProcessingId = null;
+let abortCurrentChunk = false;
+
+function reportProgress(modelKind) {
+  return (progress) => {
+    if (progress.status === 'progress' && progress.total) {
+      const lastLoadProgress = Math.round((progress.loaded / progress.total) * 100);
+      lastLoadProgressByModel.set(modelKind, lastLoadProgress);
+      self.postMessage({
+        type: 'loading',
+        progress: lastLoadProgress,
+        modelKind,
+      });
+    }
+  };
 }
 
-async function loadModel() {
+async function loadModel(modelKind = 'base') {
+  const modelId = MODEL_BY_KIND[modelKind] ?? MODEL_BY_KIND.base;
+  const transcriber = transcribers.get(modelKind);
+
   if (transcriber) {
-    // Model already loaded — re-send ready so the new client picks it up
-    self.postMessage({ type: 'ready' });
-    return;
+    self.postMessage({ type: 'ready', modelKind });
+    return true;
   }
-  if (isLoading) return;
-  isLoading = true;
-  self.postMessage({ type: 'loading', progress: 0 });
 
-  try {
-    transcriber = await pipeline(
-      'automatic-speech-recognition',
-      'onnx-community/whisper-base.en',
-      {
-        device: 'wasm',
-        dtype: 'q8',
-        progress_callback: reportProgress,
+  if (!loadPromises.has(modelKind)) {
+    lastLoadProgressByModel.set(modelKind, 0);
+    self.postMessage({ type: 'loading', progress: 0, modelKind });
+
+    const loadPromise = (async () => {
+      try {
+        const nextTranscriber = await pipeline(
+          'automatic-speech-recognition',
+          modelId,
+          {
+            device: 'wasm',
+            dtype: 'q8',
+            progress_callback: reportProgress(modelKind),
+          }
+        );
+
+        transcribers.set(modelKind, nextTranscriber);
+        self.postMessage({ type: 'ready', modelKind });
+      } catch (err) {
+        transcribers.delete(modelKind);
+        console.error('[WhisperWorker] Failed to load model:', err);
+        self.postMessage({ type: 'error', message: 'Model load failed' });
+      } finally {
+        loadPromises.delete(modelKind);
       }
-    );
+    })();
 
-    isLoading = false;
-    self.postMessage({ type: 'ready' });
-  } catch (err) {
-    isLoading = false;
-    console.error('[WhisperWorker] Failed to load model:', err);
-    self.postMessage({ type: 'error' });
+    loadPromises.set(modelKind, loadPromise);
+  } else {
+    self.postMessage({
+      type: 'loading',
+      progress: lastLoadProgressByModel.get(modelKind) ?? 0,
+      modelKind,
+    });
   }
+
+  const loadPromise = loadPromises.get(modelKind);
+  await loadPromise;
+  return transcribers.has(modelKind);
 }
 
 self.onmessage = async (e) => {
-  const { type, audio, id, tabId } = e.data;
+  const { type, audio, id, tabId, clientId, modelKind = 'base' } = e.data;
 
   if (type === 'load') {
-    await loadModel();
+    await loadModel(modelKind);
     return;
   }
 
@@ -75,31 +106,38 @@ self.onmessage = async (e) => {
   }
 
   if (type === 'transcribe') {
-    abortCurrentChunk = false;
     currentProcessingId = id;
-    if (!transcriber) await loadModel();
-    if (!transcriber) {
-      self.postMessage({ type: 'result', id, tabId, result: { text: '' } });
+    abortCurrentChunk = false;
+
+    const modelReady = transcribers.has(modelKind) || await loadModel(modelKind);
+    const transcriber = transcribers.get(modelKind);
+    if (!modelReady || !transcriber) {
+      currentProcessingId = null;
+      self.postMessage({ type: 'result', id, tabId, clientId, result: { dropped: true, dropReason: 'model-unavailable' } });
       return;
     }
 
     try {
       const result = await transcriber(new Float32Array(audio), {
-        max_new_tokens: 256,
+        max_new_tokens: e.data.return_timestamps ? 256 : 96,
         ...(e.data.return_timestamps ? { return_timestamps: true } : {}),
         callback_function: () => {
           if (abortCurrentChunk) {
             throw new Error('ABORTED');
           }
-        }
+        },
       });
-      self.postMessage({ type: 'result', id, tabId, result });
+      self.postMessage({ type: 'result', id, tabId, clientId, result });
     } catch (err: any) {
       if (err.message === 'ABORTED') {
-        self.postMessage({ type: 'result', id, tabId, result: { dropped: true } });
+        self.postMessage({ type: 'result', id, tabId, clientId, result: { dropped: true, dropReason: 'aborted' } });
       } else {
         console.error('[WhisperWorker] Transcription error:', err);
-        self.postMessage({ type: 'result', id, tabId, result: { text: '' } });
+        self.postMessage({ type: 'result', id, tabId, clientId, result: { dropped: true, dropReason: 'transcription-error' } });
+      }
+    } finally {
+      if (currentProcessingId === id) {
+        currentProcessingId = null;
       }
     }
   }
