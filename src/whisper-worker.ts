@@ -11,7 +11,7 @@ import { pipeline, env } from '@huggingface/transformers';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-env.backends.onnx.wasm.numThreads = 1;
+env.backends.onnx.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 4);
 env.backends.onnx.wasm.proxy = false;
 env.backends.onnx.wasm.wasmPaths = location.origin + '/assets/';
 
@@ -119,7 +119,8 @@ self.onmessage = async (e) => {
 
     try {
       const result = await transcriber(new Float32Array(audio), {
-        max_new_tokens: e.data.return_timestamps ? 256 : 96,
+        max_new_tokens: e.data.return_timestamps ? 256 : 64,
+        num_beams: 1,
         ...(e.data.return_timestamps ? { return_timestamps: true } : {}),
         callback_function: () => {
           if (abortCurrentChunk) {

@@ -1,11 +1,11 @@
 import type { ModelStatus, OffscreenEvent, TranscriptionResult, WhisperModelKind } from '../types';
 
 const AOT_CHUNK_TIMEOUT_MS = 300_000;
-const JIT_TIMEOUT_MS = 15_000;
+const BACKUP_JIT_TIMEOUT_MS = 25_000;
 
 interface PendingJitResult {
   resolve: (result: TranscriptionResult) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface ActiveAotResult {
@@ -59,6 +59,19 @@ export class OffscreenClient {
     this.settleActiveAot({ dropped: true });
   }
 
+  public abortActiveAOT() {
+    if (this.isDestroyed) return;
+    if (!this.activeAot) return;
+
+    const id = this.activeAot.id;
+    console.log(`[Mute.ly VOD Debug] Aborting active AOT job ID: ${id}`);
+    this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }).catch((error) => {
+      console.error('[Mute.ly Engine] Failed to send abort_job request:', error);
+    });
+
+    this.settleActiveAot({ dropped: true, dropReason: 'aborted' });
+  }
+
   public async transcribeJIT(audio: Float32Array): Promise<TranscriptionResult> {
     if (this.isDestroyed) return { text: '' };
 
@@ -66,9 +79,8 @@ export class OffscreenClient {
     return new Promise<TranscriptionResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingJitResults.delete(id);
-        this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }, true).catch(() => {});
         resolve({ text: '' });
-      }, JIT_TIMEOUT_MS);
+      }, BACKUP_JIT_TIMEOUT_MS);
 
       this.pendingJitResults.set(id, {
         timer,
@@ -97,10 +109,12 @@ export class OffscreenClient {
     if (this.isDestroyed) return Promise.resolve({ dropped: true });
 
     if (this.activeAot) {
+      console.warn(`[Mute.ly VOD Debug] transcribeAOT rejected - activeAot already exists (ID: ${this.activeAot.id})`);
       return Promise.resolve({ dropped: true });
     }
 
     const id = this.messageId++;
+    console.log(`[Mute.ly VOD Debug] Requesting chunk transcription for ${startTime}s-${endTime}s (ID: ${id})`);
 
     return new Promise<TranscriptionResult>((resolve) => {
       const finish = (result: TranscriptionResult) => {
@@ -137,7 +151,7 @@ export class OffscreenClient {
     chrome.runtime.onMessage.removeListener(this.handleMessage);
 
     for (const pending of this.pendingJitResults.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.resolve({ text: '' });
     }
     this.pendingJitResults.clear();
@@ -182,9 +196,12 @@ export class OffscreenClient {
     }
 
     if (this.activeAot?.id === id) {
+      console.log(`[Mute.ly VOD Debug] Received transcription result for active AOT ID: ${id}. text length: ${result.text?.length ?? 0}, dropped: ${result.dropped ?? false}, reason: ${result.dropReason ?? 'none'}`);
       this.activeAot.resolve(result);
       return;
     }
+
+    console.log(`[Mute.ly VOD Debug] Received result for ID: ${id} but it is not active. Ignored.`);
   }
 
   private settleActiveAot(result: TranscriptionResult) {

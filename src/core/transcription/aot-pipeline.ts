@@ -8,13 +8,14 @@ const LOOKAHEAD_CHUNKS = 4;
 const RENDER_INTERVAL_MS = 50;
 const CACHE_LIMIT_CHUNKS = 500;
 const CAPTION_END_GRACE_SECONDS = 0.45;
-const CAPTION_START_SYNC_DELAY_SECONDS = 0.08;
 const MIN_CAPTION_DURATION_SECONDS = 0.5;
-const MAX_CAPTION_DURATION_SECONDS = 7;
+const MAX_CAPTION_DURATION_SECONDS = 5;
 const SPEECH_ACTIVITY_END_GRACE_SECONDS = 1.15;
-const SPEECH_ACTIVITY_MATCH_GRACE_SECONDS = 0.6;
 const DROPPED_CHUNK_RETRY_DELAY_MS = 1500;
 const FINAL_CHUNK_BUFFER_TOLERANCE_SECONDS = 2.0;
+
+const WHISPER_START_OFFSET_SECONDS = 0.12;
+const WHISPER_END_OFFSET_SECONDS = 0.08;
 
 interface CaptionTimestamp {
   start: number;
@@ -193,11 +194,12 @@ export class AotPipeline {
     if (!this.videoElement || !this.isStarted) return;
 
     const seekDelta = this.videoElement.currentTime - this.lastPlaybackTime;
-    console.debug('[Mute.ly AOT] Seek detected', {
-      from: this.lastPlaybackTime,
-      to: this.videoElement.currentTime,
-      delta: seekDelta,
-    });
+    console.log(`[Mute.ly VOD Debug] Seek detected - Time: ${this.videoElement.currentTime}s, Delta: ${seekDelta}s, Active chunk: ${this.activeChunk?.index ?? 'none'}`);
+
+    if (this.isProcessing) {
+      this.client.abortActiveAOT();
+    }
+
     this.retryAfterByChunk.clear();
     this.clearRetryTimer();
     this.rebuildQueue('seek');
@@ -341,45 +343,36 @@ export class AotPipeline {
 
     this.isProcessing = true;
     this.activeChunk = { index: chunkIndex, startTime, endTime, ownedEnd };
-    console.debug('[Mute.ly AOT] Processing chunk', {
-      chunkIndex,
-      startTime,
-      endTime,
-      ownedEnd,
-      bufferedDuration: this.bufferedDuration,
-    });
+    console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Starting processing for chunk ${chunkIndex} (${startTime}s-${endTime}s)`);
 
     try {
       const result = await this.client.transcribeAOT(startTime, endTime);
 
-      if (!this.isStarted || sessionId !== this.sessionId) return;
+      if (!this.isStarted || sessionId !== this.sessionId) {
+        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Discarding result for chunk ${chunkIndex} due to session mismatch (current: ${this.sessionId})`);
+        return;
+      }
+
       if (result.dropped) {
         const retryAt = Date.now() + DROPPED_CHUNK_RETRY_DELAY_MS;
         this.retryAfterByChunk.set(chunkIndex, retryAt);
-        console.debug('[Mute.ly AOT] Chunk dropped; deferring retry', {
-          chunkIndex,
-          reason: result.dropReason ?? 'unknown',
-          retryInMs: DROPPED_CHUNK_RETRY_DELAY_MS,
-        });
+        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} dropped/deferred. Reason: ${result.dropReason ?? 'unknown'}`);
         return;
       }
 
       const captions = this.parseCaptions(result, startTime, ownedEnd);
       this.retryAfterByChunk.delete(chunkIndex);
       this.cache.set(chunkIndex, captions);
-      console.debug('[Mute.ly AOT] Chunk processed', {
-        chunkIndex,
-        captionCount: captions.length,
-        dropped: false,
-      });
+      console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} processed successfully. Cached ${captions.length} captions.`);
 
       this.renderCaptions();
     } catch (error) {
       if (this.isStarted && sessionId === this.sessionId) {
-        console.error(`[Mute.ly AOT] Chunk ${chunkIndex} failed:`, error);
+        console.error(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} failed:`, error);
       }
     } finally {
       if (sessionId === this.sessionId) {
+        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Releasing lock for chunk ${chunkIndex}.`);
         this.activeChunk = null;
         this.isProcessing = false;
         this.rebuildQueue('chunk-complete');
@@ -415,7 +408,8 @@ export class AotPipeline {
     }
 
     captions.sort((a, b) => a.start - b.start);
-    return mergeAdjacentDuplicates(captions);
+    const merged = mergeAdjacentDuplicates(captions);
+    return resolveTemporalOverlaps(merged);
   }
 
   private renderCaptions() {
@@ -489,12 +483,12 @@ function normalizeCaption(
   chunkStart: number,
   ownedEnd: number
 ): CaptionTimestamp | null {
-  const start = clamp(rawStart + CAPTION_START_SYNC_DELAY_SECONDS, chunkStart, ownedEnd);
+  const start = clamp(rawStart + WHISPER_START_OFFSET_SECONDS, chunkStart, ownedEnd);
   if (start >= ownedEnd) return null;
 
   const minimumEnd = Math.min(start + MIN_CAPTION_DURATION_SECONDS, ownedEnd);
   const maximumEnd = Math.min(start + MAX_CAPTION_DURATION_SECONDS, ownedEnd);
-  const end = clamp(Math.max(rawEnd, minimumEnd), start, maximumEnd);
+  const end = clamp(Math.max(rawEnd + WHISPER_END_OFFSET_SECONDS, minimumEnd), start, maximumEnd);
   if (end <= start) return null;
 
   return { start, end, text };
@@ -525,6 +519,7 @@ function alignCaptionToSpeechActivity(
   const match = findBestSpeechActivity(caption, activity);
   if (!match) return caption;
 
+  // Anchoring start to never precede the actual voice activity onset.
   const start = Math.max(caption.start, match.start);
   const end = Math.min(caption.end, match.end + SPEECH_ACTIVITY_END_GRACE_SECONDS);
   if (end <= start) return null;
@@ -548,12 +543,7 @@ function findBestSpeechActivity(caption: CaptionTimestamp, activity: SpeechActiv
     }
   }
 
-  if (bestMatch) return bestMatch;
-
-  return activity.find((window) => (
-    window.start >= caption.start &&
-    window.start <= caption.end + SPEECH_ACTIVITY_MATCH_GRACE_SECONDS
-  )) ?? null;
+  return bestMatch;
 }
 
 function mergeAdjacentDuplicates(captions: CaptionTimestamp[]) {
@@ -569,6 +559,36 @@ function mergeAdjacentDuplicates(captions: CaptionTimestamp[]) {
   }
 
   return merged;
+}
+
+function resolveTemporalOverlaps(captions: CaptionTimestamp[]): CaptionTimestamp[] {
+  if (captions.length <= 1) return captions;
+
+  const resolved: CaptionTimestamp[] = [];
+  const MIN_GAP_SECONDS = 0.08;
+
+  for (let i = 0; i < captions.length; i++) {
+    resolved.push({ ...captions[i] });
+  }
+
+  for (let i = 0; i < resolved.length - 1; i++) {
+    const current = resolved[i];
+    const next = resolved[i + 1];
+
+    if (current.end > next.start - MIN_GAP_SECONDS) {
+      const maxPossibleEnd = next.start - MIN_GAP_SECONDS;
+      const minRequiredEnd = current.start + MIN_CAPTION_DURATION_SECONDS;
+
+      if (maxPossibleEnd >= minRequiredEnd) {
+        current.end = maxPossibleEnd;
+      } else {
+        current.end = minRequiredEnd;
+        next.start = current.end + MIN_GAP_SECONDS;
+      }
+    }
+  }
+
+  return resolved.filter(c => c.end > c.start);
 }
 
 function clamp(value: number, min: number, max: number) {

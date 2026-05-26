@@ -13,6 +13,9 @@ export class SubtitleOverlay {
 
   public setMode(mode: 'live' | 'vod') {
     this.mode = mode;
+    if (this.container) {
+      this.container.style.transition = mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.35s ease-in-out';
+    }
     if (this.textElement) {
       if (mode === 'live') {
         this.textElement.style.boxShadow = '0 0 12px rgba(255, 0, 0, 0.6)';
@@ -38,6 +41,7 @@ export class SubtitleOverlay {
       ...BASE_CONTAINER_STYLE,
       bottom: '10%',
       zIndex: '9999',
+      transition: this.mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.35s ease-in-out',
     });
 
     this.textElement = document.createElement('span');

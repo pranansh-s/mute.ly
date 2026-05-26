@@ -5,7 +5,7 @@ import type { ModelStatus, TranscriptionResult, WhisperModelKind } from '../type
 
 type CaptionCallback = (text: string, isPartial: boolean) => void;
 
-const LIVE_CAPTION_CLEAR_DELAY_MS = 1600;
+const LIVE_CAPTION_CLEAR_DELAY_MS = 1200;
 
 export class TranscriptionEngine {
   private onCaption: CaptionCallback;
@@ -70,9 +70,6 @@ export class TranscriptionEngine {
 
   public async transcribe(audio: Float32Array): Promise<void> {
     if (this.isDestroyed || !this.isReady || this.aotMode) return;
-    if (this.isLiveSpeechActive) {
-      this.clearSpeechEndTimer();
-    }
 
     if (this.isProcessing) {
       this.pendingLiveAudio = audio;
@@ -87,9 +84,20 @@ export class TranscriptionEngine {
 
       const text = result?.text?.trim() || '';
       if (text && !isHallucination(text)) {
-        this.onCaption(text, this.isLiveSpeechActive);
-        this.lastText = text;
+        this.clearSpeechEndTimer();
+
+        let mergedText = text;
+        if (this.isLiveSpeechActive && this.lastText) {
+          mergedText = mergeOverlap(this.lastText, text);
+        }
+        this.onCaption(mergedText, this.isLiveSpeechActive);
+        this.lastText = mergedText;
+
         if (!this.isLiveSpeechActive) {
+          this.scheduleLiveCaptionClear();
+        }
+      } else {
+        if (!this.speechEndTimer) {
           this.scheduleLiveCaptionClear();
         }
       }
@@ -108,19 +116,13 @@ export class TranscriptionEngine {
     if (this.isDestroyed || this.aotMode) return;
     this.isLiveSpeechActive = true;
     this.clearSpeechEndTimer();
+    this.lastText = '';
   }
 
   public onSpeechEnd() {
     if (this.isDestroyed || this.aotMode) return;
     this.isLiveSpeechActive = false;
-
-    if (this.lastText) {
-      this.onCaption(this.lastText, false);
-      this.scheduleLiveCaptionClear();
-      return;
-    }
-
-    this.onCaption('', false);
+    this.scheduleLiveCaptionClear();
   }
 
   public destroy() {
@@ -155,4 +157,62 @@ export class TranscriptionEngine {
     clearTimeout(this.speechEndTimer);
     this.speechEndTimer = null;
   }
+}
+
+function mergeOverlap(accumulated: string, incoming: string): string {
+  if (!accumulated) return incoming;
+  if (!incoming) return accumulated;
+
+  const aWords = accumulated.trim().split(/\s+/);
+  const nWords = incoming.trim().split(/\s+/);
+
+  const clean = (w: string) => w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
+
+  let bestMatch = {
+    accumIndex: -1,
+    incomingIndex: -1,
+    matchLen: 0
+  };
+
+  const maxAnchors = Math.min(4, nWords.length);
+
+  for (let j = 0; j < maxAnchors; j++) {
+    const anchor = clean(nWords[j]);
+    if (!anchor) continue;
+
+    const searchStart = Math.max(0, aWords.length - 8);
+    for (let i = aWords.length - 1; i >= searchStart; i--) {
+      if (clean(aWords[i]) === anchor) {
+        let matchLen = 0;
+        let scanA = i;
+        let scanI = j;
+
+        while (scanA < aWords.length && scanI < nWords.length) {
+          if (clean(aWords[scanA]) === clean(nWords[scanI])) {
+            matchLen++;
+          } else {
+            break;
+          }
+          scanA++;
+          scanI++;
+        }
+
+        if (matchLen > bestMatch.matchLen) {
+          bestMatch = {
+            accumIndex: i,
+            incomingIndex: j,
+            matchLen: matchLen
+          };
+        }
+      }
+    }
+  }
+
+  if (bestMatch.matchLen > 0) {
+    const prefix = aWords.slice(0, bestMatch.accumIndex).join(" ");
+    const remainingIncoming = nWords.slice(bestMatch.incomingIndex).join(" ");
+    return prefix ? `${prefix} ${remainingIncoming}` : remainingIncoming;
+  }
+
+  return incoming;
 }

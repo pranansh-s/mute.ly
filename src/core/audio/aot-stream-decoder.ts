@@ -1,4 +1,5 @@
 import type { SpeechActivityWindow, WhisperModelKind } from '../types';
+import { preprocessAudio } from './audio-preprocessor';
 
 export interface TranscribeAOTRequest {
   id: number;
@@ -129,6 +130,8 @@ export class AotStreamDecoder {
     }
 
     const slice = this.copySlice(startSample, availableEndSample);
+    preprocessAudio(slice);
+
     if (slice.length === 0 || isSilent(slice)) {
       this.onEmptyResult(request);
       return;

@@ -4,8 +4,8 @@ import { TranscriptionEngine } from '../transcription/transcription-engine';
 const TARGET_SAMPLE_RATE = 16000;
 const PLAY_WAIT_TIMEOUT_MS = 10000;
 
-const LIVE_WINDOW_S = 3.0;
-const LIVE_STEP_S = 0.5;
+const LIVE_WINDOW_S = 2.0;
+const LIVE_STEP_S = 0.25;
 const MIN_LIVE_SPEECH_S = 0.0;
 
 const EXTENSION_ASSET_URL = chrome.runtime.getURL('assets/');
@@ -45,6 +45,10 @@ export class AudioExtractor {
         baseAssetPath: EXTENSION_ASSET_URL,
         onnxWASMBasePath: EXTENSION_ASSET_URL,
         getStream: async () => stream,
+        positiveSpeechThreshold: 0.45,
+        redemptionFrames: 5,
+        preSpeechPadFrames: 5,
+        minSpeechFrames: 3,
         onSpeechStart: () => {
           this.isSpeechActive = true;
           this.samplesAccumulated = 0;

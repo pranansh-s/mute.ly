@@ -9,6 +9,8 @@
 import type { OffscreenCommand, OffscreenEvent, SpeechActivityWindow, WhisperModelKind } from './core/types';
 import { AotStreamDecoder, type TranscribeAOTRequest } from './core/audio/aot-stream-decoder';
 
+import { preprocessAudio } from './core/audio/audio-preprocessor';
+
 type RoutedCommand = OffscreenCommand & {
   _fromBackground?: boolean;
   tabId?: number;
@@ -47,6 +49,9 @@ let activeWorkerJobWatchdog: ReturnType<typeof setTimeout> | null = null;
 let workerQueue: WorkerJob[] = [];
 let activeAotOwner: AotOwner | null = null;
 const modelStates = new Map<WhisperModelKind, ModelStatusState>();
+
+// Start a sub-audible keep-alive loop to prevent Chrome from closing the offscreen document
+keepOffscreenAlive();
 
 const decoder = new AotStreamDecoder(
   (bufferedSeconds) => send(ownerEvent({ type: 'aot_buffer_progress', bufferedSeconds })),
@@ -110,16 +115,19 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       }
       decoder.transcribeSlice(msg as unknown as TranscribeAOTRequest);
       break;
-    case 'transcribe':
+    case 'transcribe': {
+      const floatAudio = new Float32Array(msg.audio);
+      preprocessAudio(floatAudio);
       enqueueWorkerJob({
         mode: 'jit',
-        audio: msg.audio,
+        audio: Array.from(floatAudio),
         id: msg.id,
         tabId: msg.tabId,
         clientId: msg.clientId,
         modelKind: msg.modelKind,
       });
       break;
+    }
   }
 });
 
@@ -379,4 +387,26 @@ function ownerEvent<T extends OffscreenEvent>(msg: T): T {
     tabId: routedMsg.tabId ?? activeAotOwner?.tabId,
     clientId: routedMsg.clientId ?? activeAotOwner?.clientId,
   } as T;
+}
+
+function keepOffscreenAlive() {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1, ctx.currentTime);
+    gainNode.gain.setValueAtTime(0.001, ctx.currentTime);
+    
+    osc.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    
+    osc.start();
+    console.log('[Mute.ly Offscreen] Silent audio oscillator started for keep-alive.');
+  } catch (err) {
+    console.warn('[Mute.ly Offscreen] Failed to start silent keep-alive loop:', err);
+  }
 }
