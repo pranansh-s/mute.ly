@@ -1,25 +1,75 @@
 # Mute.ly
 
-Free, private YouTube captions powered by local AI — runs entirely on your machine. No API keys, no cloud servers, and your data never leaves your network.
+<div align="center">
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Extension-v2.0.0-green.svg)](https://chrome.google.com/webstore)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-darkgreen.svg)](https://nodejs.org/)
+[![WASM](https://img.shields.io/badge/WASM-Optimized-blueviolet.svg)](https://webassembly.org/)
+
+**Free, private YouTube captions powered by local AI — running entirely on your machine.**<br>
+*No API keys, no cloud servers, and your data never leaves your local network.*
+
+---
+
+[Architecture](#architecture--event-flow) • [DSP Preprocessing](#high-performance-audio-dsp-pipeline) • [Key Features](#key-features) • [Installation](#getting-started) • [Project Structure](#project-structure)
+
+</div>
+
+---
 
 ## What It Does
 
-Mute.ly is a Chrome extension that transcribes YouTube audio using a Whisper model running locally. It supports both live streams and pre-recorded VODs (Video on Demand) using a dual-mode architecture.
+**Mute.ly** is a Chrome extension that transcribes YouTube audio in real-time using a local Whisper model running directly in your browser. It supports both live streams and pre-recorded VODs (Video on Demand) using a specialized dual-mode architecture.
 
-- **Fully Local**: All AI inference happens directly in your browser. The VOD backend runs entirely on your local machine.
-- **Zero Setup APIs**: No accounts or API keys required.
-- **Dual-Mode Processing**:
-  - **Live Streams**: Uses real-time Voice Activity Detection (VAD) driven sliding window transcription for low-latency captions directly via browser tab audio capture.
-  - **VODs**: Uses a high-performance, seek-aware Ahead-of-Time (AOT) transcription pipeline. A local Node server securely downloads the audio track via `yt-dlp` and proxies it to the extension for offline decoding and fast chunked processing.
-- **WASM Optimized**: Runs securely within a single-threaded WebAssembly environment to comply with strict Chrome Manifest V3 Content Security Policies.
+*   **100% Private & Local**: All AI inference happens securely in your browser's WebAssembly environment. The VOD backend runs entirely on your local machine. No tracking, no latency spikes, no cloud subscriptions.
+*   **Zero Setup**: No accounts, credit cards, or API keys required. Install and go.
+*   **Dual-Mode Processing**:
+    *   **Live Streams (JIT)**: Tab audio is captured and analyzed using a low-latency Voice Activity Detection (VAD) driven sliding window loop.
+    *   **VODs (AOT)**: A seek-aware Ahead-of-Time pipeline fetches raw PCM audio via a local Node.js proxy server, decode-slices it on-the-fly, and renders captions asynchronously.
+
+---
+
+## Key Features
+
+### 🎙️ Low-Latency Audio DSP Preprocessing
+Whisper models can hallucinate or degrade in accuracy when exposed to low-frequency AC rumble, background hum, high-frequency static hiss, or ambient music. Mute.ly solves this by feeding all audio through an in-place Digital Signal Processing (DSP) preprocessor:
+*   **Second-Order Butterworth High-Pass Biquad (150Hz)**: Filters out sub-bass rumble and room hum with a steep 12dB/octave slope.
+*   **Second-Order Butterworth Low-Pass Biquad (3500Hz)**: Implements telephony-grade bandpass standards (G.711) to isolate human vocal cords and aggressively strip out music, static hiss, and high-frequency noise.
+*   **Peak Gain Normalization**: Dynamically scales quiet speakers to peak `0.8` gain while clamping loud sounds, ensuring Whisper always operates in its optimal dynamic range. Safe scaling is bypassed on pure noise to prevent noise amplification.
+*   **Steep 20ms Frame Noise Gate**: Smoothly silences pop sounds, breathing, keyboard clicks, and environmental music under `-36dBFS` (RMS `0.015`), completely curing noise-induced hallucinations.
+
+### ⏱️ Temporal Precision & Visual Readability
+*   **Constant Latency Offsets**: Compensates for Whisper's temporal attention window by shifting subtitle onset (`+120ms` start) and offset (`+80ms` end) frame-accurately with spoken words.
+*   **Bidirectional Overlap Resolution**: Enforces a professional **`80ms` (2 frames) gap** between consecutive subtitles. If adjacent subtitles overlap, the algorithm dynamically trims or shifts boundaries to preserve readability duration and eliminate caption flashing.
+*   **Multi-Anchor sliding window merging**: Prevents JIT live subtitles from rewriting dynamically using backward-sliding word overlap alignment.
+
+### 🔌 Production-Grade Extension Engineering
+*   **Instant Cooperative Seek Aborts**: Seeking cancels the active Whisper inference run via worker thread abort messages, immediately releasing the queue lock and allowing instant subtitle loading on seek locations.
+*   **Manifest V3 Silent Keep-Alive**: Plays a sub-audible 1Hz silent oscillator using the Web Audio API to prevent Google Chrome from ever silently shutting down or suspending the offscreen page worker.
+*   **Client/Tab Isolation**: Message payloads carry strict tab and client ID metadata, preventing old or dead browser tabs from corrupting active subtitle players.
+
+---
 
 ## Architecture & Event Flow
 
-The system is split into the **Chrome Extension** (UI + AI inference) and a **Local Node.js Proxy Server** (VOD audio extraction). All communication between the Content Script and the Offscreen Document is relayed through the Background Service Worker — Chrome MV3 does not allow direct messaging between them.
+The system is split into the **Chrome Extension** (UI + WebAssembly AI inference) and a **Local Node.js Proxy Server** (VOD audio extraction). Communication between the Content Script and the Offscreen Document is relayed through the Background Service Worker — Chrome MV3 does not allow direct messaging between them.
+
+```
+[YouTube Tab] <== (Service Worker Relay) ==> [Offscreen Page] <==> [Whisper Worker (WASM)]
+     ||                                             ||
+     || (Live: captureStream)                       || (VOD: HTTP Streaming Fetch)
+     \/                                             \/
+[Local Audio Output]                        [Local Node Server :3000]
+                                                    || (yt-dlp | ffmpeg)
+                                                    \/
+                                            [YouTube CDN Stream]
+```
 
 ### Live Stream Pipeline
 
-In live mode, the Content Script captures tab audio via `captureStream()`, runs Voice Activity Detection locally (Silero VAD v5), and sends the latest 3.0-second speech window to the Offscreen Document for transcription.
+In live mode, the Content Script captures tab audio via `captureStream()`, runs Voice Activity Detection locally (Silero VAD v5), and sends the latest 2.0-second speech window to the Offscreen Document for transcription.
 
 ```mermaid
 sequenceDiagram
@@ -38,9 +88,10 @@ sequenceDiagram
     BG-->>CS: Relay ready
 
     CS->>YT: captureStream() → VAD
-    loop On Speech (3.0s latest window, 0.5s step)
+    loop On Speech (2.0s latest window, 0.25s step)
         CS->>BG: {type: transcribe, audio: Float32[]}
         BG->>OD: Relay
+        Note over OD: In-place DSP pre-filtering + noise gating
         OD->>WW: Transcribe chunk
         WW-->>OD: {type: result, text}
         OD-->>BG: Relay result
@@ -84,7 +135,7 @@ sequenceDiagram
     loop Current chunk + lookahead around playback
         CS->>BG: {type: transcribe_aot, start, end, id, clientId}
         BG->>OD: Relay
-        Note over OD: Single worker gate serializes Whisper jobs
+        Note over OD: Biquad HPF/LPF speech bandpass + noise gate
         OD->>WW: Transcribe active job
         WW-->>OD: {type: result, timestamps + text, tabId, clientId}
         OD-->>BG: Route result to requesting tabId
@@ -93,81 +144,80 @@ sequenceDiagram
 
     Note over CS: Render loop (20fps): lookup cached captions by video.currentTime
     CS->>YT: Display matching caption
-    Note over CS: On seek: reconcile pending chunks, keep useful active work, continue sequentially
+    Note over CS: On seek: cancel active worker Whisper run, flush queue, reload instantly
 ```
 
-#### VOD Queue Contract
-The VOD chunking architecture is intentionally simple and deterministic:
+---
 
-- **One AOT Queue Owner**: `AotPipeline` is the only component that decides which VOD chunks to process. It enqueues the current playback chunk plus a small lookahead window.
-- **Seek Handling**: Seeking reconciles the pending queue against the new playback window. Useful active work is not aborted, and unchanged nearby queues are preserved.
-- **Sequential Processing**: Only one AOT chunk request is active from the content script at a time. `OffscreenClient` rejects accidental overlapping AOT requests instead of overriding an in-flight promise.
-- **Worker Gate Only**: The Offscreen Document owns the physical Whisper worker and serializes jobs, but it does not reprioritize AOT chunks. Scheduling stays in `AotPipeline`.
-- **Deterministic Cache Reuse**: Completed chunks are cached by stable chunk index. Seeking backward into cached regions restores captions immediately without retranscription.
-- **Timing Stability**: Timestamped Whisper output is clamped to the chunk ownership window, adjacent duplicate captions are merged, and a small display grace reduces seam flicker at chunk boundaries.
+## High-Performance Audio DSP Pipeline
 
-#### Production Resilience
-- **No Seek-Time Worker Poisoning**: Normal seeks never send abort messages to the worker. Old active work can finish cleanly and be reused later.
-- **Bounded Caption Cache**: A small LRU cache keeps processed chunks reusable while preventing unbounded long-session growth.
-- **Chunked PCM Storage**: VOD PCM audio is stored as streamed chunks in the Offscreen Document instead of one repeatedly reallocated giant buffer.
-- **Client/Tab Isolation**: Message payloads carry tab and client ownership metadata so old tabs or replaced clients cannot commit captions into the wrong player.
-- **Reliable Model Reuse**: The Offscreen Document tracks whether the model is idle, loading, or ready. Already-loaded models are reused immediately, duplicate load requests attach to the active load, and stalled loads restart the Whisper worker instead of leaving the UI in loading forever.
-- **Retryable Chunk Failures**: Temporarily unavailable audio ranges and worker transcription failures return `dropped: true`, so the AOT cache only stores successful chunk outcomes. Revisiting a failed/dequeued chunk can request it again cleanly.
-- **Dropped Chunk Deferral**: Dropped chunks are not cached and are deferred briefly before retry so the queue avoids tight retry loops. Explicit seeks clear the deferral so returning to an incomplete chunk can retry immediately.
-- **Lower-Latency Live Captions**: Live mode uses a shorter latest-window path and keeps only the newest pending live audio window while Whisper is busy, reducing stale live captions without overlapping workers.
+Mute.ly features a dedicated **telephony-grade bandpass and silence gating preprocessor** before any audio is sent for AI inference:
 
-### Component Breakdown
+```
+[Raw Audio PCM] 
+      ||
+      \/
+[Biquad HPF (150Hz)] ===> Cuts hum, AC rumble, sub-bass
+      ||
+      \/
+[Biquad LPF (3500Hz)] ===> Cuts static hiss, high-frequency music
+      ||
+      \/
+[Peak gain Normalizer] ===> Targets 0.8 gain cleanly (bypasses noise)
+      ||
+      \/
+[20ms Noise Gate] ===> Fades signals < -36dBFS to absolute silence
+      ||
+      \/
+[Filtered PCM Speech] ===> Fed to Whisper / VAD
+```
 
-1. **Content Script (`src/content.ts`)**: Monitors the YouTube player, injects UI, and orchestrates the pipeline based on the video type (live vs VOD).
-2. **Local Express Server (`server/`)**: Bypasses browser CORS limitations by using `yt-dlp` to download and serve the highest quality audio track. Only used for VODs.
-3. **Background Service Worker (`src/background.ts`)**: Stateless message relay between Content Script and Offscreen Document. Also manages the Offscreen Document lifecycle.
-4. **Offscreen Document (`src/offscreen.ts`)**: A hidden DOM environment that fetches VOD audio into a chunked PCM store, slices requested ranges, and forwards audio chunks to the Whisper Worker.
-5. **Whisper Web Worker (`src/whisper-worker.ts`)**: Runs `Transformers.js` (Whisper-base.en, ONNX q8) in a background thread for non-blocking WASM inference.
+---
 
 ## Getting Started
 
 ### Prerequisites
 
-- **Google Chrome** 113+ (for WebGPU / modern WASM support)
-- **Node.js** 18+ (for building and running the local proxy)
-- **yt-dlp**: Must be installed on your system and available in your PATH. 
-  - macOS: `brew install yt-dlp`
-  - Linux: `sudo apt install yt-dlp`
-  - Windows: `winget install yt-dlp`
+*   **Google Chrome** 113+ (for WebGPU and modern WebAssembly features)
+*   **Node.js** 18+ (for building and serving the local proxy)
+*   **yt-dlp**: Must be installed and available in your system path:
+    *   macOS: `brew install yt-dlp`
+    *   Linux: `sudo apt install yt-dlp`
+    *   Windows: `winget install yt-dlp`
 
 ### Installation
 
-1. Install dependencies and build the extension:
-```bash
-npm install
-npm run build
-```
+1.  **Install dependencies and build the extension:**
+    ```bash
+    npm install
+    npm run build
+    ```
 
-2. Start the local VOD audio proxy server:
-```bash
-npm run server
-```
+2.  **Start the local VOD audio proxy server:**
+    ```bash
+    npm run server
+    ```
 
-3. Load the extension in Chrome:
-   - Open `chrome://extensions`
-   - Enable **Developer mode**
-   - Click **Load unpacked** → select the `dist` folder
-   - Navigate to any YouTube video and click the speaker icon in the player controls!
+3.  **Load the extension in Chrome:**
+    *   Open `chrome://extensions` in your browser.
+    *   Enable **Developer mode** (toggle in the top-right).
+    *   Click **Load unpacked** (top-left) and select the `dist` folder generated inside the workspace.
+    *   Navigate to any YouTube video and click the speaker icon in the video controls overlay to start captions!
 
-On first activation, the model will download (~75MB). A pulsing orange indicator shows progress. After that, it loads from cache instantly.
+*On first execution, the model will download (~75MB). A pulsing orange indicator shows loading progress. Once downloaded, it is cached locally in IndexedDB for instant startup.*
 
-### Development
+### Developer Commands
 
-For hot-reloading the extension during development:
+Hot-reload extension changes during development:
 ```bash
 npm run dev
 ```
-*(Remember to manually reload the extension in `chrome://extensions` after file changes)*
-
-To clean stale build artifacts before a fresh build:
+Clean the build folder:
 ```bash
-npm run clean && npm run build
+npm run clean
 ```
+
+---
 
 ## Project Structure
 
@@ -175,49 +225,50 @@ npm run clean && npm run build
 .
 ├── server/
 │   ├── index.cjs               # Express server entry point
-│   ├── routes.cjs              # Handles audio proxying and yt-dlp spawning
-│   └── temp/                   # Cached .webm audio files (gitignored)
+│   ├── routes.cjs              # Spawns yt-dlp & ffmpeg to stream f32le PCM
+│   └── temp/                   # Cached webm audio tracks (gitignored)
 ├── src/
-│   ├── background.ts           # Service worker: offscreen lifecycle + message routing
-│   ├── content.ts              # Content script: YouTube monitor, UI orchestration
-│   ├── offscreen.ts            # Offscreen document: AOT audio decoding & slicing
-│   ├── whisper-worker.ts       # Web Worker: Transformers.js inference
+│   ├── background.ts           # Service worker: offscreen lifecycle + relay routing
+│   ├── content.ts              # Content script: monitors player and overlays UI
+│   ├── offscreen.ts            # Hidden DOM: fetches VOD stream and slices audio
+│   ├── whisper-worker.ts       # Web Worker: non-blocking WASM inference
 │   ├── core/
-│   │   ├── types.ts            # Shared types: MonitorStatus, message protocol unions
+│   │   ├── types.ts            # Shared types and message schema unions
 │   │   ├── audio/
-│   │   │   ├── audio-extractor.ts    # Live audio capture via VAD + captureStream
-│   │   │   └── aot-stream-decoder.ts # VOD PCM stream buffering and slice extraction
+│   │   │   ├── audio-extractor.ts    # JIT live capturer utilizing Silero VAD
+│   │   │   ├── audio-preprocessor.ts # DSP pipeline: HPF/LPF, normalizer, noise gate
+│   │   │   └── aot-stream-decoder.ts # Progressive AOT stream PCM store and decoders
 │   │   ├── transcription/
-│   │   │   ├── transcription-engine.ts  # Orchestrator: routes to JIT or AOT pipeline
-│   │   │   ├── offscreen-client.ts      # Chrome messaging client for offscreen document
-│   │   │   ├── aot-pipeline.ts          # Seek-aware chunked VOD transcription
-│   │   │   └── hallucination-filter.ts  # Filters Whisper phantom outputs
+│   │   │   ├── transcription-engine.ts  # Logic orchestrator (Live vs VOD)
+│   │   │   ├── offscreen-client.ts      # Browser messaging wrapper for offscreen
+│   │   │   ├── aot-pipeline.ts          # Seek-aware chunked AOT scheduler
+│   │   │   └── hallucination-filter.ts  # Filters Whisper phantom text patterns
 │   │   └── youtube/
-│   │       └── youtube-dom.ts           # YouTube DOM queries (video element, controls)
+│   │       └── youtube-dom.ts           # DOM scraping and player controls
 │   └── ui/
-│       ├── player-button.ts    # YouTube player button (states: idle/loading/active/error)
-│       └── subtitle-overlay.ts # Caption rendering overlay with loading/error states
-```
-
-## Technical Details
-
-| Component | Detail |
-|---|---|
-| **Models** | Live: `onnx-community/whisper-tiny.en`; VOD: `onnx-community/whisper-base.en` (ONNX, quantized q8) |
-| **Inference** | Transformers.js v4, single-threaded WASM |
-| **Live Audio** | VAD (Silero v5) → 3.0s latest window, 0.5s step |
-| **VOD Audio** | AOT decoding via local proxy → seek-aware 30s chunk slicing (25s stride) |
-| **Sample Rate** | 16kHz mono Float32 |
-| **Permissions** | `offscreen` |
-
-## Testing
-
-Build the extension:
-
-```bash
-npm run build
+│       ├── player-button.ts    # Custom control bar button (loading/ready states)
+│       ├── subtitle-overlay.ts # Premium typography caption visual overlays
+│       └── overlay-styles.ts   # Curated dark mode glassmorphic layout CSS
 ```
 
 ---
 
-Built with ❤️ for a more accessible YouTube.
+## Technical Specifications
+
+| Parameter | Specification |
+|:---|:---|
+| **WASM Models** | Live: `whisper-tiny.en` (~75MB) • VOD: `whisper-base.en` (~140MB) |
+| **Quantization** | ONNX quantized q8 (8-bit integer weights) for optimal CPU cache hits |
+| **Speech Bandpass** | Second-order Butterworth Biquad (`150Hz - 3500Hz`) |
+| **Noise Gate** | 20ms Frame RMS at `0.015` threshold (-36dBFS) |
+| **Gain Target** | Normalization peak target of `0.8` (triggered above `0.06` peak) |
+| **Format** | 16kHz mono Float32 Linear PCM |
+| **CPU Threading** | Multi-threaded WASM inference (`numThreads` dynamic based on hardware core concurrency) |
+
+---
+
+## License
+
+This project is open-source and available under the [MIT License](LICENSE).
+
+*Built with ❤️ for a more private, accessible, and fast YouTube viewing experience.*
