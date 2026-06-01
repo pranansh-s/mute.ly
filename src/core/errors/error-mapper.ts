@@ -13,6 +13,13 @@ export function mapErrorToUI(error: unknown): UIErrorData {
     };
   }
 
+  if (errMsg.includes('NO_AUDIO_TRACK')) {
+    return {
+      title: 'No Audio Track',
+      advice: 'Could not capture audio from this video. It may be DRM-protected or have no audio stream.'
+    };
+  }
+
   if (errMsg.includes('Permission denied') || errMsg.includes('Requested device not found')) {
     return {
       title: 'Microphone Access Denied',

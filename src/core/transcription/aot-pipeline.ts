@@ -11,6 +11,7 @@ const CAPTION_END_GRACE_SECONDS = 0.45;
 const MIN_CAPTION_DURATION_SECONDS = 0.5;
 const MAX_CAPTION_DURATION_SECONDS = 5;
 const SPEECH_ACTIVITY_END_GRACE_SECONDS = 1.15;
+const SPEECH_ACTIVITY_MATCH_GRACE_SECONDS = 0.6;
 const DROPPED_CHUNK_RETRY_DELAY_MS = 1500;
 const FINAL_CHUNK_BUFFER_TOLERANCE_SECONDS = 2.0;
 
@@ -120,6 +121,7 @@ export class AotPipeline {
   private lastPlaybackTime = 0;
   private isStarted = false;
   private sessionId = 0;
+  private lastRebuiltChunkIndex = -1;
 
   private audioDuration = Infinity;
   private bufferedDuration = 0;
@@ -149,6 +151,8 @@ export class AotPipeline {
     this.audioDuration = Infinity;
     this.bufferedDuration = 0;
     this.totalChunks = Infinity;
+
+    this.lastRebuiltChunkIndex = -1;
 
     this.rebuildQueue('start');
     this.restartRenderTimer();
@@ -194,21 +198,38 @@ export class AotPipeline {
     if (!this.videoElement || !this.isStarted) return;
 
     const seekDelta = this.videoElement.currentTime - this.lastPlaybackTime;
-    console.log(`[Mute.ly VOD Debug] Seek detected - Time: ${this.videoElement.currentTime}s, Delta: ${seekDelta}s, Active chunk: ${this.activeChunk?.index ?? 'none'}`);
+    console.debug('[Mute.ly AOT] Seek detected', {
+      currentTime: this.videoElement.currentTime,
+      delta: seekDelta,
+      activeChunk: this.activeChunk?.index ?? null,
+    });
 
-    if (this.isProcessing) {
-      this.client.abortActiveAOT();
+    if (this.isProcessing && this.activeChunk) {
+      const neededChunks = this.getNeededChunks();
+      if (!neededChunks.includes(this.activeChunk.index)) {
+        this.client.abortActiveAOT();
+      } else {
+        console.debug('[Mute.ly AOT] Active chunk kept after seek', {
+          chunkIndex: this.activeChunk.index,
+        });
+      }
     }
 
     this.retryAfterByChunk.clear();
     this.clearRetryTimer();
+    this.lastRebuiltChunkIndex = -1;
     this.rebuildQueue('seek');
     this.renderCaptions();
   };
 
   private handleTimeUpdate = () => {
-    if (this.videoElement) this.lastPlaybackTime = this.videoElement.currentTime;
-    this.rebuildQueue('timeupdate');
+    if (!this.videoElement) return;
+    this.lastPlaybackTime = this.videoElement.currentTime;
+    const currentChunk = this.getChunkIndex(this.videoElement.currentTime);
+    if (currentChunk !== this.lastRebuiltChunkIndex) {
+      this.lastRebuiltChunkIndex = currentChunk;
+      this.rebuildQueue('timeupdate');
+    }
   };
 
   private handleEnded = () => {
@@ -343,36 +364,55 @@ export class AotPipeline {
 
     this.isProcessing = true;
     this.activeChunk = { index: chunkIndex, startTime, endTime, ownedEnd };
-    console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Starting processing for chunk ${chunkIndex} (${startTime}s-${endTime}s)`);
+    console.debug('[Mute.ly AOT] Processing chunk', {
+      chunkIndex,
+      startTime,
+      endTime,
+      ownedEnd,
+      bufferedDuration: this.bufferedDuration,
+    });
 
     try {
       const result = await this.client.transcribeAOT(startTime, endTime);
 
       if (!this.isStarted || sessionId !== this.sessionId) {
-        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Discarding result for chunk ${chunkIndex} due to session mismatch (current: ${this.sessionId})`);
+        console.debug('[Mute.ly AOT] Discarding stale chunk result', {
+          chunkIndex,
+          sessionId,
+          currentSessionId: this.sessionId,
+        });
         return;
       }
 
       if (result.dropped) {
-        const retryAt = Date.now() + DROPPED_CHUNK_RETRY_DELAY_MS;
-        this.retryAfterByChunk.set(chunkIndex, retryAt);
-        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} dropped/deferred. Reason: ${result.dropReason ?? 'unknown'}`);
+        if (result.dropReason !== 'aborted') {
+          const retryAt = Date.now() + DROPPED_CHUNK_RETRY_DELAY_MS;
+          this.retryAfterByChunk.set(chunkIndex, retryAt);
+        }
+        console.debug('[Mute.ly AOT] Chunk dropped', {
+          chunkIndex,
+          reason: result.dropReason ?? 'unknown',
+          retryable: result.dropReason !== 'aborted',
+        });
         return;
       }
 
       const captions = this.parseCaptions(result, startTime, ownedEnd);
       this.retryAfterByChunk.delete(chunkIndex);
       this.cache.set(chunkIndex, captions);
-      console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} processed successfully. Cached ${captions.length} captions.`);
+      console.debug('[Mute.ly AOT] Chunk cached', {
+        chunkIndex,
+        captionCount: captions.length,
+      });
 
       this.renderCaptions();
     } catch (error) {
       if (this.isStarted && sessionId === this.sessionId) {
-        console.error(`[Mute.ly VOD Debug] [Session: ${sessionId}] Chunk ${chunkIndex} failed:`, error);
+        console.error(`[Mute.ly AOT] Chunk ${chunkIndex} failed:`, error);
       }
     } finally {
       if (sessionId === this.sessionId) {
-        console.log(`[Mute.ly VOD Debug] [Session: ${sessionId}] Releasing lock for chunk ${chunkIndex}.`);
+        console.debug('[Mute.ly AOT] Active chunk released', { chunkIndex });
         this.activeChunk = null;
         this.isProcessing = false;
         this.rebuildQueue('chunk-complete');
@@ -519,7 +559,6 @@ function alignCaptionToSpeechActivity(
   const match = findBestSpeechActivity(caption, activity);
   if (!match) return caption;
 
-  // Anchoring start to never precede the actual voice activity onset.
   const start = Math.max(caption.start, match.start);
   const end = Math.min(caption.end, match.end + SPEECH_ACTIVITY_END_GRACE_SECONDS);
   if (end <= start) return null;
@@ -543,7 +582,12 @@ function findBestSpeechActivity(caption: CaptionTimestamp, activity: SpeechActiv
     }
   }
 
-  return bestMatch;
+  if (bestMatch) return bestMatch;
+
+  return activity.find((window) => (
+    window.start >= caption.start &&
+    window.start <= caption.end + SPEECH_ACTIVITY_MATCH_GRACE_SECONDS
+  )) ?? null;
 }
 
 function mergeAdjacentDuplicates(captions: CaptionTimestamp[]) {

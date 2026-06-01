@@ -50,7 +50,6 @@ let workerQueue: WorkerJob[] = [];
 let activeAotOwner: AotOwner | null = null;
 const modelStates = new Map<WhisperModelKind, ModelStatusState>();
 
-// Start a sub-audible keep-alive loop to prevent Chrome from closing the offscreen document
 keepOffscreenAlive();
 
 const decoder = new AotStreamDecoder(
@@ -228,7 +227,7 @@ function armModelLoadWatchdog(modelKind: WhisperModelKind) {
     if (modelStatus.state !== 'loading') return;
 
     console.error('[Offscreen] Model load stalled; restarting Whisper worker.');
-    send({ type: 'error', message: 'Model load stalled. Please try again.' });
+    send({ type: 'error', message: 'Model load stalled. Please try again.', modelKind });
     restartWorker('model-load-stalled');
   }, MODEL_LOAD_STALL_MS);
 }
@@ -240,7 +239,8 @@ function clearModelLoadWatchdog(modelKind: WhisperModelKind) {
   modelStatus.watchdog = null;
 }
 
-function restartWorker(_reason: string) {
+function restartWorker(reason: string) {
+  console.warn(`[Mute.ly Offscreen] Restarting Whisper worker: ${reason}`);
   clearActiveWorkerJobWatchdog();
   for (const modelStatus of modelStates.values()) {
     if (modelStatus.watchdog) clearTimeout(modelStatus.watchdog);
@@ -405,7 +405,6 @@ function keepOffscreenAlive() {
     gainNode.connect(ctx.destination);
     
     osc.start();
-    console.log('[Mute.ly Offscreen] Silent audio oscillator started for keep-alive.');
   } catch (err) {
     console.warn('[Mute.ly Offscreen] Failed to start silent keep-alive loop:', err);
   }

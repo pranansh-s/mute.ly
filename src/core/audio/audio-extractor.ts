@@ -3,6 +3,7 @@ import { TranscriptionEngine } from '../transcription/transcription-engine';
 
 const TARGET_SAMPLE_RATE = 16000;
 const PLAY_WAIT_TIMEOUT_MS = 10000;
+const AUDIO_TRACK_TIMEOUT_MS = 15000;
 
 const LIVE_WINDOW_S = 2.0;
 const LIVE_STEP_S = 0.25;
@@ -36,7 +37,8 @@ export class AudioExtractor {
       }
 
       const audioTrack = await this.waitForAudioTrack(videoElement);
-      if (!this.isExtracting || !audioTrack) return;
+      if (!this.isExtracting) return;
+      if (!audioTrack) throw new Error('NO_AUDIO_TRACK');
 
       const stream = new MediaStream([audioTrack]);
 
@@ -112,7 +114,9 @@ export class AudioExtractor {
   }
 
   private async waitForAudioTrack(videoElement: HTMLVideoElement): Promise<MediaStreamTrack | null> {
+    const deadline = Date.now() + AUDIO_TRACK_TIMEOUT_MS;
     while (this.isExtracting) {
+      if (Date.now() > deadline) return null;
       const captureFn = (videoElement as any).captureStream || (videoElement as any).mozCaptureStream;
       if (captureFn) {
         try {

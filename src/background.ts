@@ -32,8 +32,6 @@ async function ensureOffscreen() {
   try {
     await creationPromise;
   } finally {
-    // Re-check the actual offscreen context on the next wake/use. A resolved
-    // promise can outlive Chrome's offscreen document lifecycle.
     creationPromise = null;
   }
 }
@@ -51,14 +49,12 @@ async function forwardToOffscreen(data: Record<string, unknown>, tabId?: number)
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // Messages FROM offscreen worker (loading, ready, result, error)
   if (msg._fromOffscreen) {
     if (typeof msg.tabId === 'number') {
       chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {
         activeTabs.delete(msg.tabId);
       });
     } else if (GLOBAL_EVENT_TYPES.has(msg.type)) {
-      // Broadcast global events (like loading/ready) to all known active tabs
       for (const tabId of activeTabs) {
         chrome.tabs.sendMessage(tabId, msg).catch(() => {
           activeTabs.delete(tabId);
@@ -68,7 +64,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
-  // Messages FROM content script (target: offscreen)
   if (msg.target === 'offscreen') {
     const tabId = sender.tab?.id;
     if (typeof tabId === 'number') activeTabs.add(tabId);

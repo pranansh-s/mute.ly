@@ -11,9 +11,7 @@ export class ErrorOverlay {
   private container: HTMLDivElement | null = null;
   private errorElement: HTMLDivElement | null = null;
 
-  constructor() {
-    this.checkAndInject();
-  }
+  constructor() {}
 
   public checkAndInject = () => {
     if (this.container && document.body.contains(this.container)) return;

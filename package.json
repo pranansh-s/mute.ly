@@ -6,7 +6,8 @@
     "dev": "vite build --watch",
     "build": "tsc && vite build && vite build --config vite.worker.config.ts",
     "clean": "rm -rf dist",
-    "server": "node server/index.cjs"
+    "server": "node server/index.cjs",
+    "test:aot": "npm run build && node test-aot-pipeline.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

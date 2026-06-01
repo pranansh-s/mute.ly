@@ -27,7 +27,7 @@ class BiquadFilter {
   }
 }
 
-export function createHighPassBiquad(cutoffHz: number, sampleRate = 16000): BiquadFilter {
+function createHighPassBiquad(cutoffHz: number, sampleRate = 16000): BiquadFilter {
   const w0 = (2.0 * Math.PI * cutoffHz) / sampleRate;
   const cosW0 = Math.cos(w0);
   const sinW0 = Math.sin(w0);
@@ -44,7 +44,7 @@ export function createHighPassBiquad(cutoffHz: number, sampleRate = 16000): Biqu
   return new BiquadFilter(b0, b1, b2, a1, a2);
 }
 
-export function createLowPassBiquad(cutoffHz: number, sampleRate = 16000): BiquadFilter {
+function createLowPassBiquad(cutoffHz: number, sampleRate = 16000): BiquadFilter {
   const w0 = (2.0 * Math.PI * cutoffHz) / sampleRate;
   const cosW0 = Math.cos(w0);
   const sinW0 = Math.sin(w0);
@@ -61,7 +61,7 @@ export function createLowPassBiquad(cutoffHz: number, sampleRate = 16000): Biqua
   return new BiquadFilter(b0, b1, b2, a1, a2);
 }
 
-export function normalizeGain(audio: Float32Array, targetMax = 0.8): void {
+function normalizeGain(audio: Float32Array, targetMax = 0.8): void {
   let maxVal = 0;
   for (let i = 0; i < audio.length; i++) {
     const absVal = Math.abs(audio[i]);
@@ -78,8 +78,8 @@ export function normalizeGain(audio: Float32Array, targetMax = 0.8): void {
   }
 }
 
-export function applyNoiseGate(audio: Float32Array, sampleRate = 16000, gateThreshold = 0.015): void {
-  const frameSize = Math.floor(sampleRate * 0.02); // 20ms frames
+function applyNoiseGate(audio: Float32Array, sampleRate = 16000, gateThreshold = 0.015): void {
+  const frameSize = Math.floor(sampleRate * 0.02);
   if (frameSize <= 0) return;
 
   for (let offset = 0; offset < audio.length; offset += frameSize) {

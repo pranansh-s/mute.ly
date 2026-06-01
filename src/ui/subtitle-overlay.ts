@@ -7,9 +7,7 @@ export class SubtitleOverlay {
   private loadingElement: HTMLDivElement | null = null;
   private mode: 'live' | 'vod' = 'vod';
 
-  constructor() {
-    this.checkAndInject();
-  }
+  constructor() {}
 
   public setMode(mode: 'live' | 'vod') {
     this.mode = mode;

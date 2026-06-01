@@ -29,7 +29,7 @@ export type OffscreenEvent =
   | { type: 'ready'; modelKind?: WhisperModelKind }
   | { type: 'aot_buffer_progress'; bufferedSeconds: number; tabId?: number; clientId?: string }
   | { type: 'aot_audio_ready'; duration: number; tabId?: number; clientId?: string }
-  | { type: 'error'; message: string; tabId?: number; clientId?: string }
+  | { type: 'error'; message: string; modelKind?: WhisperModelKind; tabId?: number; clientId?: string }
   | {
       type: 'result';
       id: number;

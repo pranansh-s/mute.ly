@@ -134,7 +134,6 @@ class YouTubeMonitor {
 
       if (!isLive && videoId && videoElement) {
         engine.initialize('base');
-        // VOD Pipeline: verify server is running, then start AOT with static proxy URL
         const isServerUp = await this.checkServerHealth();
         if (!this.isCurrentProcessingRun(generation, engine)) return;
         if (videoId !== this.currentVideoId) return;
@@ -151,7 +150,6 @@ class YouTubeMonitor {
           this.errorOverlay.showError('Server Unreachable', 'Ensure "npm run server" is running in the mute.ly directory.');
         }
       } else if (videoElement) {
-        // Live Pipeline: real-time transcription via captureStream
         this.subtitleOverlay.setMode('live');
         engine.initialize('tiny');
         await this.audioExtractor.startExtraction(engine, videoElement);

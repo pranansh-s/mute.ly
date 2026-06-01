@@ -70,7 +70,7 @@ async function loadModel(modelKind = 'base') {
       } catch (err) {
         transcribers.delete(modelKind);
         console.error('[WhisperWorker] Failed to load model:', err);
-        self.postMessage({ type: 'error', message: 'Model load failed' });
+        self.postMessage({ type: 'error', message: 'Model load failed', modelKind });
       } finally {
         loadPromises.delete(modelKind);
       }

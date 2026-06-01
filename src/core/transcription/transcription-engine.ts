@@ -30,7 +30,6 @@ export class TranscriptionEngine {
     this.client = new OffscreenClient();
     this.aotPipeline = new AotPipeline(this.client, onCaption);
 
-    // Relay client events to our listeners
     this.client.onStatusChange = (s) => {
       if (s === 'ready') this.isReady = true;
       this.onStatusChange?.(s);

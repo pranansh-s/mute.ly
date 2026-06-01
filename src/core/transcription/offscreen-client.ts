@@ -64,7 +64,7 @@ export class OffscreenClient {
     if (!this.activeAot) return;
 
     const id = this.activeAot.id;
-    console.log(`[Mute.ly VOD Debug] Aborting active AOT job ID: ${id}`);
+    console.debug('[Mute.ly VOD] Aborting active AOT job', { id });
     this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }).catch((error) => {
       console.error('[Mute.ly Engine] Failed to send abort_job request:', error);
     });
@@ -109,12 +109,14 @@ export class OffscreenClient {
     if (this.isDestroyed) return Promise.resolve({ dropped: true });
 
     if (this.activeAot) {
-      console.warn(`[Mute.ly VOD Debug] transcribeAOT rejected - activeAot already exists (ID: ${this.activeAot.id})`);
+      console.warn('[Mute.ly VOD] transcribeAOT rejected because another AOT job is active', {
+        activeId: this.activeAot.id,
+      });
       return Promise.resolve({ dropped: true });
     }
 
     const id = this.messageId++;
-    console.log(`[Mute.ly VOD Debug] Requesting chunk transcription for ${startTime}s-${endTime}s (ID: ${id})`);
+    console.debug('[Mute.ly VOD] Requesting chunk transcription', { id, startTime, endTime });
 
     return new Promise<TranscriptionResult>((resolve) => {
       const finish = (result: TranscriptionResult) => {
@@ -179,6 +181,7 @@ export class OffscreenClient {
         this.onAotReady?.(msg.duration);
         break;
       case 'error':
+        if (msg.modelKind && msg.modelKind !== this.requestedModelKind) return;
         console.error('[Mute.ly Engine] Error from offscreen:', msg.message);
         this.onStatusChange?.('error');
         break;
@@ -196,12 +199,17 @@ export class OffscreenClient {
     }
 
     if (this.activeAot?.id === id) {
-      console.log(`[Mute.ly VOD Debug] Received transcription result for active AOT ID: ${id}. text length: ${result.text?.length ?? 0}, dropped: ${result.dropped ?? false}, reason: ${result.dropReason ?? 'none'}`);
+      console.debug('[Mute.ly VOD] Received active AOT result', {
+        id,
+        textLength: result.text?.length ?? 0,
+        dropped: result.dropped ?? false,
+        dropReason: result.dropReason ?? null,
+      });
       this.activeAot.resolve(result);
       return;
     }
 
-    console.log(`[Mute.ly VOD Debug] Received result for ID: ${id} but it is not active. Ignored.`);
+    console.debug('[Mute.ly VOD] Orphaned result ignored', { id });
   }
 
   private settleActiveAot(result: TranscriptionResult) {
