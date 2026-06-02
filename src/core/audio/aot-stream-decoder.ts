@@ -15,7 +15,7 @@ export interface TranscribeAOTRequest {
 const SAMPLE_RATE = 16000;
 const STREAM_READ_TIMEOUT_MS = 90_000;
 const PROGRESS_INTERVAL_SECONDS = 2;
-const DIGITAL_SILENCE_RMS_THRESHOLD = 0.0001;
+const RMS_SILENCE_THRESHOLD = 0.0001;
 const VAD_FRAME_SECONDS = 0.02;
 const VAD_MIN_SPEECH_SECONDS = 0.12;
 const VAD_MERGE_GAP_SECONDS = 0.22;
@@ -106,7 +106,7 @@ export class AotStreamDecoder {
       if (abort.signal.aborted) return;
 
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[Offscreen] AOT Stream Error:', error);
+      console.error('[mutely:offscreen] AOT Stream Error:', error);
       this.streamAbort = null;
       this.audioChunks = [];
       this.bufferedSamples = 0;
@@ -115,34 +115,54 @@ export class AotStreamDecoder {
   }
 
   public transcribeSlice(request: TranscribeAOTRequest) {
-    if (this.bufferedSamples === 0) {
+    try {
+      if (this.bufferedSamples === 0) {
+        this.onDroppedResult(request);
+        return;
+      }
+
+      if (
+        !Number.isFinite(request.startTime) ||
+        !Number.isFinite(request.endTime) ||
+        request.endTime <= request.startTime
+      ) {
+        this.onDroppedResult(request);
+        return;
+      }
+
+      const startSample = Math.floor(request.startTime * SAMPLE_RATE);
+      const endSample = Math.floor(request.endTime * SAMPLE_RATE);
+
+      if (startSample < 0 || endSample <= startSample) {
+        this.onDroppedResult(request);
+        return;
+      }
+
+      if (endSample > this.bufferedSamples) {
+        this.onDroppedResult(request);
+        return;
+      }
+
+      const slice = this.copySlice(startSample, endSample);
+      preprocessAudio(slice);
+
+      const rms = calculateRms(slice);
+      const isSliceSilent = slice.length === 0 || rms < RMS_SILENCE_THRESHOLD;
+
+      if (isSliceSilent) {
+        this.onEmptyResult(request);
+        return;
+      }
+
+      const sliceStartTime = startSample / SAMPLE_RATE;
+      const sliceEndTime = endSample / SAMPLE_RATE;
+      this.onTranscribe(slice, {
+        ...request,
+        speechActivity: detectSpeechActivity(slice, sliceStartTime, sliceEndTime),
+      });
+    } catch (error: unknown) {
       this.onDroppedResult(request);
-      return;
     }
-
-    const startSample = Math.max(0, Math.floor(request.startTime * SAMPLE_RATE));
-    const endSample = Math.max(startSample, Math.floor(request.endTime * SAMPLE_RATE));
-    const availableEndSample = Math.min(endSample, this.bufferedSamples);
-
-    if (startSample >= availableEndSample) {
-      this.onDroppedResult(request);
-      return;
-    }
-
-    const slice = this.copySlice(startSample, availableEndSample);
-    preprocessAudio(slice);
-
-    if (slice.length === 0 || isSilent(slice)) {
-      this.onEmptyResult(request);
-      return;
-    }
-
-    const sliceStartTime = startSample / SAMPLE_RATE;
-    const sliceEndTime = availableEndSample / SAMPLE_RATE;
-    this.onTranscribe(slice, {
-      ...request,
-      speechActivity: detectSpeechActivity(slice, sliceStartTime, sliceEndTime),
-    });
   }
 
   private copySlice(startSample: number, endSample: number) {
@@ -225,13 +245,15 @@ function decodePcmChunk(value: Uint8Array, leftoverBuffer: Uint8Array) {
   };
 }
 
-function isSilent(audio: Float32Array) {
+function calculateRms(audio: Float32Array) {
+  if (audio.length === 0) return 0;
+
   let sumSquares = 0;
   for (let i = 0; i < audio.length; i++) {
     sumSquares += audio[i] * audio[i];
   }
 
-  return Math.sqrt(sumSquares / audio.length) < DIGITAL_SILENCE_RMS_THRESHOLD;
+  return Math.sqrt(sumSquares / audio.length);
 }
 
 function detectSpeechActivity(

@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<img src="assets/banner.gif" alt="Mute.ly Banner" width="100%" />
+
+<br/>
+<br/>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Chrome Web Store](https://img.shields.io/badge/Chrome_Extension-v2.0.0-green.svg)](https://chrome.google.com/webstore)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
@@ -27,7 +32,7 @@
 *   **Zero Setup**: No accounts, credit cards, or API keys required. Install and go.
 *   **Dual-Mode Processing**:
     *   **Live Streams (JIT)**: Tab audio is captured and analyzed using a low-latency Voice Activity Detection (VAD) driven sliding window loop.
-    *   **VODs (AOT)**: A seek-aware Ahead-of-Time pipeline fetches raw PCM audio via a local Node.js proxy server, decode-slices it on-the-fly, and renders captions asynchronously.
+    *   **VODs (AOT)**: A seek-aware Ahead-of-Time pipeline fetches raw PCM audio through a local Node.js proxy server, keeps a progressive in-memory PCM buffer, slices buffered ranges on demand, and renders timestamped captions asynchronously.
 
 ---
 
@@ -46,7 +51,9 @@ Whisper models can hallucinate or degrade in accuracy when exposed to low-freque
 *   **Multi-Anchor sliding window merging**: Prevents JIT live subtitles from rewriting dynamically using backward-sliding word overlap alignment.
 
 ### 🔌 Production-Grade Extension Engineering
-*   **Instant Cooperative Seek Aborts**: Seeking cancels the active Whisper inference run via worker thread abort messages, immediately releasing the queue lock and allowing instant subtitle loading on seek locations.
+*   **Seek-Aware AOT Scheduling**: Seeking prunes stale pending work, keeps useful in-flight chunks when they still cover the new playhead, and preempts stale Whisper jobs when the active chunk no longer matches the target region.
+*   **Worker Recovery for Stale VOD Jobs**: AOT aborts can restart the Whisper worker while preserving queued work, preventing old inference jobs from blocking captions after rapid seeking.
+*   **Buffered-Range Guards**: VOD chunk dispatch waits until the full requested audio slice is available, avoiding partial or misleading captions when seeking beyond the current PCM buffer frontier.
 *   **Manifest V3 Silent Keep-Alive**: Plays a sub-audible 1Hz silent oscillator using the Web Audio API to prevent Google Chrome from ever silently shutting down or suspending the offscreen page worker.
 *   **Client/Tab Isolation**: Message payloads carry strict tab and client ID metadata, preventing old or dead browser tabs from corrupting active subtitle players.
 
@@ -102,7 +109,7 @@ sequenceDiagram
 
 ### VOD Pipeline (Streaming Ahead-of-Time)
 
-In VOD mode, audio is processed ahead of playback. The Content Script sends only the proxy **URL** — the Offscreen Document performs the actual HTTP fetch from the local server and progressively reads raw PCM chunks into memory. Captions are rendered on a decoupled 20fps timer using binary search against stored timestamps, enabling instant seek.
+In VOD mode, audio is processed ahead of playback. The Content Script sends only the proxy **URL** — the Offscreen Document performs the actual HTTP fetch from the local server and progressively reads raw PCM chunks into memory. Captions are rendered on a decoupled 20fps timer using binary search against stored timestamps. The scheduler follows the current playhead and lookahead window, waits for buffered audio before dispatching a chunk, and avoids re-requesting completed ranges.
 
 ```mermaid
 sequenceDiagram
@@ -135,6 +142,7 @@ sequenceDiagram
     loop Current chunk + lookahead around playback
         CS->>BG: {type: transcribe_aot, start, end, id, clientId}
         BG->>OD: Relay
+        Note over CS: Dispatch only when requested range is fully buffered
         Note over OD: Biquad HPF/LPF speech bandpass + noise gate
         OD->>WW: Transcribe active job
         WW-->>OD: {type: result, timestamps + text, tabId, clientId}
@@ -144,8 +152,19 @@ sequenceDiagram
 
     Note over CS: Render loop (20fps): lookup cached captions by video.currentTime
     CS->>YT: Display matching caption
-    Note over CS: On seek: cancel active worker Whisper run, flush queue, reload instantly
+    Note over CS: On seek: prune stale queue, keep useful work, preempt stale active chunks
 ```
+
+### VOD Seeking Behavior
+
+VOD transcription is scheduled around the current YouTube playhead using 30-second chunks with a 25-second stride. Each chunk is keyed by its canonical time range, so already-completed ranges are not requested again after backward seeks or scrubbing.
+
+When the user seeks:
+*   Pending chunks outside the new playhead window are discarded.
+*   Pending chunks that are still useful are retained instead of requeued.
+*   The active chunk is kept only if it covers the new playhead.
+*   If the active chunk is stale, the content-side request is resolved as aborted and the offscreen worker is restarted so stale Whisper inference cannot block the next requested chunk.
+*   If the target range is not yet buffered, dispatch waits until buffer progress reaches the requested chunk end.
 
 ---
 
@@ -226,22 +245,21 @@ npm run clean
 ├── server/
 │   ├── index.cjs               # Express server entry point
 │   ├── routes.cjs              # Spawns yt-dlp & ffmpeg to stream f32le PCM
-│   └── temp/                   # Cached webm audio tracks (gitignored)
 ├── src/
 │   ├── background.ts           # Service worker: offscreen lifecycle + relay routing
 │   ├── content.ts              # Content script: monitors player and overlays UI
-│   ├── offscreen.ts            # Hidden DOM: fetches VOD stream and slices audio
+│   ├── offscreen.ts            # Hidden DOM: owns worker queue and VOD audio decoder
 │   ├── whisper-worker.ts       # Web Worker: non-blocking WASM inference
 │   ├── core/
 │   │   ├── types.ts            # Shared types and message schema unions
 │   │   ├── audio/
 │   │   │   ├── audio-extractor.ts    # JIT live capturer utilizing Silero VAD
 │   │   │   ├── audio-preprocessor.ts # DSP pipeline: HPF/LPF, normalizer, noise gate
-│   │   │   └── aot-stream-decoder.ts # Progressive AOT stream PCM store and decoders
+│   │   │   └── aot-stream-decoder.ts # Progressive AOT PCM store and range slicer
 │   │   ├── transcription/
 │   │   │   ├── transcription-engine.ts  # Logic orchestrator (Live vs VOD)
 │   │   │   ├── offscreen-client.ts      # Browser messaging wrapper for offscreen
-│   │   │   ├── aot-pipeline.ts          # Seek-aware chunked AOT scheduler
+│   │   │   ├── aot-pipeline.ts          # Seek-aware AOT queue and caption cache
 │   │   │   └── hallucination-filter.ts  # Filters Whisper phantom text patterns
 │   │   └── youtube/
 │   │       └── youtube-dom.ts           # DOM scraping and player controls

@@ -37,7 +37,7 @@ export class OffscreenClient {
     this.requestedModelKind = modelKind;
     this.onStatusChange?.('loading');
     this.sendToOffscreen({ type: 'load', clientId: this.clientId, modelKind }).catch((error) => {
-      console.error('[Mute.ly Engine] Failed to initialize offscreen model:', error);
+      console.error('[mutely:engine] Failed to initialize offscreen model:', error);
       this.onStatusChange?.('error');
     });
   }
@@ -46,7 +46,7 @@ export class OffscreenClient {
     if (this.isDestroyed) return;
     this.aotStarted = true;
     this.sendToOffscreen({ type: 'load_aot', url, clientId: this.clientId }).catch((error) => {
-      console.error('[Mute.ly Engine] Failed to start AOT stream:', error);
+      console.error('[mutely:aot] Failed to start AOT stream:', error);
       this.onStatusChange?.('error');
     });
   }
@@ -64,9 +64,8 @@ export class OffscreenClient {
     if (!this.activeAot) return;
 
     const id = this.activeAot.id;
-    console.debug('[Mute.ly VOD] Aborting active AOT job', { id });
     this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }).catch((error) => {
-      console.error('[Mute.ly Engine] Failed to send abort_job request:', error);
+      console.error('[mutely:aot] Failed to send abort_job request:', error);
     });
 
     this.settleActiveAot({ dropped: true, dropReason: 'aborted' });
@@ -98,7 +97,7 @@ export class OffscreenClient {
         clientId: this.clientId,
         modelKind: 'tiny',
       }).catch((error) => {
-        console.error('[Mute.ly Engine] Failed to send live transcription request:', error);
+        console.error('[mutely:engine] Failed to send live transcription request:', error);
         const pending = this.pendingJitResults.get(id);
         if (pending) pending.resolve({ text: '' });
       });
@@ -109,14 +108,13 @@ export class OffscreenClient {
     if (this.isDestroyed) return Promise.resolve({ dropped: true });
 
     if (this.activeAot) {
-      console.warn('[Mute.ly VOD] transcribeAOT rejected because another AOT job is active', {
+      console.warn('[mutely:aot] transcribeAOT rejected because another AOT job is active', {
         activeId: this.activeAot.id,
       });
       return Promise.resolve({ dropped: true });
     }
 
     const id = this.messageId++;
-    console.debug('[Mute.ly VOD] Requesting chunk transcription', { id, startTime, endTime });
 
     return new Promise<TranscriptionResult>((resolve) => {
       const finish = (result: TranscriptionResult) => {
@@ -141,7 +139,7 @@ export class OffscreenClient {
         clientId: this.clientId,
         modelKind: 'base',
       }).catch((error) => {
-        console.error('[Mute.ly Engine] Failed to send AOT transcription request:', error);
+        console.error('[mutely:aot] Failed to send AOT transcription request:', error);
         finish({ dropped: true, dropReason: 'send-failed' });
       });
     });
@@ -182,7 +180,7 @@ export class OffscreenClient {
         break;
       case 'error':
         if (msg.modelKind && msg.modelKind !== this.requestedModelKind) return;
-        console.error('[Mute.ly Engine] Error from offscreen:', msg.message);
+        console.error('[mutely:engine] Error from offscreen:', msg.message);
         this.onStatusChange?.('error');
         break;
       case 'result':
@@ -199,26 +197,14 @@ export class OffscreenClient {
     }
 
     if (this.activeAot?.id === id) {
-      console.debug('[Mute.ly VOD] Received active AOT result', {
-        id,
-        textLength: result.text?.length ?? 0,
-        dropped: result.dropped ?? false,
-        dropReason: result.dropReason ?? null,
-      });
       this.activeAot.resolve(result);
       return;
     }
-
-    console.debug('[Mute.ly VOD] Orphaned result ignored', { id });
   }
 
   private settleActiveAot(result: TranscriptionResult) {
     if (!this.activeAot) return;
-
-    const active = this.activeAot;
-    clearTimeout(active.timer);
-    this.activeAot = null;
-    active.resolve(result);
+    this.activeAot.resolve(result);
   }
 
   /** Wraps chrome.runtime.sendMessage with the target/data envelope expected by background.ts. */
