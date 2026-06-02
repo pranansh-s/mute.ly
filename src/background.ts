@@ -71,7 +71,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     forwardToOffscreen(msg.data, tabId)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => {
-        console.error('[Mute.ly Background] Failed to forward message to offscreen:', error);
+        console.error('[mutely:bg] Failed to forward message to offscreen:', error);
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
 

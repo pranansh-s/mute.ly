@@ -5,6 +5,7 @@ import type { SpeechActivityWindow, TranscriptionResult } from '../types';
 const CHUNK_DURATION_SECONDS = 30;
 const CHUNK_STRIDE_SECONDS = 25;
 const LOOKAHEAD_CHUNKS = 4;
+const POLL_INTERVAL_MS = 500;
 const RENDER_INTERVAL_MS = 50;
 const CACHE_LIMIT_CHUNKS = 500;
 const CAPTION_END_GRACE_SECONDS = 0.45;
@@ -13,7 +14,6 @@ const MAX_CAPTION_DURATION_SECONDS = 5;
 const SPEECH_ACTIVITY_END_GRACE_SECONDS = 1.15;
 const SPEECH_ACTIVITY_MATCH_GRACE_SECONDS = 0.6;
 const DROPPED_CHUNK_RETRY_DELAY_MS = 1500;
-const FINAL_CHUNK_BUFFER_TOLERANCE_SECONDS = 2.0;
 
 const WHISPER_START_OFFSET_SECONDS = 0.12;
 const WHISPER_END_OFFSET_SECONDS = 0.08;
@@ -25,6 +25,16 @@ interface CaptionTimestamp {
 }
 
 interface ActiveChunk {
+  key: string;
+  index: number;
+  startTime: number;
+  endTime: number;
+  ownedEnd: number;
+  seekGeneration: number;
+}
+
+interface ChunkRequest {
+  key: string;
   index: number;
   startTime: number;
   endTime: number;
@@ -32,18 +42,31 @@ interface ActiveChunk {
 }
 
 class CaptionCache {
-  private chunks = new Map<number, CaptionTimestamp[]>();
+  private chunks = new Map<string, CaptionTimestamp[]>();
+  private keyByIndex = new Map<number, string>();
+  private captionTotal = 0;
 
-  public has(chunkIndex: number) {
-    return this.chunks.has(chunkIndex);
+  public has(key: string) {
+    return this.chunks.has(key);
   }
 
-  public set(chunkIndex: number, captions: CaptionTimestamp[]) {
-    if (this.chunks.has(chunkIndex)) {
-      this.chunks.delete(chunkIndex);
+  public set(chunk: ChunkRequest, captions: CaptionTimestamp[]) {
+    const previousKey = this.keyByIndex.get(chunk.index);
+    if (previousKey && previousKey !== chunk.key) {
+      const previousCaptions = this.chunks.get(previousKey);
+      if (previousCaptions) this.captionTotal -= previousCaptions.length;
+      this.chunks.delete(previousKey);
     }
 
-    this.chunks.set(chunkIndex, captions);
+    const existingCaptions = this.chunks.get(chunk.key);
+    if (existingCaptions) {
+      this.captionTotal -= existingCaptions.length;
+      this.chunks.delete(chunk.key);
+    }
+
+    this.keyByIndex.set(chunk.index, chunk.key);
+    this.chunks.set(chunk.key, captions);
+    this.captionTotal += captions.length;
     this.trim();
   }
 
@@ -60,22 +83,23 @@ class CaptionCache {
 
     visibleCaptions.sort((a, b) => a.start - b.start);
 
-    let match: CaptionTimestamp | null = null;
     let lo = 0;
-    let hi = visibleCaptions.length - 1;
+    let hi = visibleCaptions.length;
 
-    while (lo <= hi) {
+    while (lo < hi) {
       const mid = (lo + hi) >>> 1;
       if (visibleCaptions[mid].start <= currentTime) {
-        match = visibleCaptions[mid];
         lo = mid + 1;
       } else {
-        hi = mid - 1;
+        hi = mid;
       }
     }
 
-    if (match && currentTime <= match.end + CAPTION_END_GRACE_SECONDS) {
-      return match;
+    for (let i = lo - 1; i >= 0; i--) {
+      const caption = visibleCaptions[i];
+      if (caption.start <= currentTime && currentTime <= caption.end + CAPTION_END_GRACE_SECONDS) {
+        return caption;
+      }
     }
 
     return null;
@@ -83,6 +107,8 @@ class CaptionCache {
 
   public clear() {
     this.chunks.clear();
+    this.keyByIndex.clear();
+    this.captionTotal = 0;
   }
 
   public get size() {
@@ -90,11 +116,14 @@ class CaptionCache {
   }
 
   private get(chunkIndex: number) {
-    const captions = this.chunks.get(chunkIndex);
+    const key = this.keyByIndex.get(chunkIndex);
+    if (!key) return null;
+
+    const captions = this.chunks.get(key);
     if (!captions) return null;
 
-    this.chunks.delete(chunkIndex);
-    this.chunks.set(chunkIndex, captions);
+    this.chunks.delete(key);
+    this.chunks.set(key, captions);
     return captions;
   }
 
@@ -102,16 +131,25 @@ class CaptionCache {
     while (this.chunks.size > CACHE_LIMIT_CHUNKS) {
       const oldestChunk = this.chunks.keys().next().value;
       if (oldestChunk === undefined) return;
+      const captions = this.chunks.get(oldestChunk);
+      if (captions) this.captionTotal -= captions.length;
       this.chunks.delete(oldestChunk);
+      for (const [index, key] of this.keyByIndex) {
+        if (key === oldestChunk) {
+          this.keyByIndex.delete(index);
+          break;
+        }
+      }
     }
   }
 }
 
 export class AotPipeline {
   private readonly cache = new CaptionCache();
-  private pendingQueue: number[] = [];
+  private pendingQueue: ChunkRequest[] = [];
   private activeChunk: ActiveChunk | null = null;
   private isProcessing = false;
+  private schedulerTimer: ReturnType<typeof setInterval> | null = null;
   private renderTimer: ReturnType<typeof setInterval> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimerAt = Infinity;
@@ -121,6 +159,7 @@ export class AotPipeline {
   private lastPlaybackTime = 0;
   private isStarted = false;
   private sessionId = 0;
+  private seekGeneration = 0;
   private lastRebuiltChunkIndex = -1;
 
   private audioDuration = Infinity;
@@ -148,6 +187,7 @@ export class AotPipeline {
     this.retryAfterByChunk.clear();
     this.clearRetryTimer();
     this.lastText = '';
+    this.seekGeneration = 0;
     this.audioDuration = Infinity;
     this.bufferedDuration = 0;
     this.totalChunks = Infinity;
@@ -155,6 +195,7 @@ export class AotPipeline {
     this.lastRebuiltChunkIndex = -1;
 
     this.rebuildQueue('start');
+    this.restartSchedulerTimer();
     this.restartRenderTimer();
 
     videoElement.addEventListener('seeking', this.handleSeek);
@@ -183,6 +224,8 @@ export class AotPipeline {
 
     if (this.renderTimer) clearInterval(this.renderTimer);
     this.renderTimer = null;
+    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    this.schedulerTimer = null;
     this.clearRetryTimer();
     this.detachVideoListeners();
 
@@ -197,22 +240,20 @@ export class AotPipeline {
   private handleSeek = () => {
     if (!this.videoElement || !this.isStarted) return;
 
-    const seekDelta = this.videoElement.currentTime - this.lastPlaybackTime;
-    console.debug('[Mute.ly AOT] Seek detected', {
-      currentTime: this.videoElement.currentTime,
-      delta: seekDelta,
-      activeChunk: this.activeChunk?.index ?? null,
-    });
+    const newTime = this.videoElement.currentTime;
+    const neededChunks = this.getNeededChunks();
+    const neededKeys = new Set(neededChunks.map(chunk => chunk.key));
+    const activeChunkCoversPlayhead = this.activeChunk
+      ? this.activeChunk.startTime <= newTime && newTime < this.activeChunk.ownedEnd
+      : false;
 
-    if (this.isProcessing && this.activeChunk) {
-      const neededChunks = this.getNeededChunks();
-      if (!neededChunks.includes(this.activeChunk.index)) {
-        this.client.abortActiveAOT();
-      } else {
-        console.debug('[Mute.ly AOT] Active chunk kept after seek', {
-          chunkIndex: this.activeChunk.index,
-        });
-      }
+    this.pendingQueue = this.pendingQueue.filter(chunk => neededKeys.has(chunk.key));
+
+    if (this.isProcessing && this.activeChunk && !activeChunkCoversPlayhead) {
+      this.seekGeneration++;
+      this.client.abortActiveAOT();
+    } else if (!this.activeChunk || !activeChunkCoversPlayhead) {
+      this.seekGeneration++;
     }
 
     this.retryAfterByChunk.clear();
@@ -246,46 +287,51 @@ export class AotPipeline {
     this.renderTimer = setInterval(() => this.renderCaptions(), RENDER_INTERVAL_MS);
   }
 
-  private rebuildQueue(reason: string) {
+  private restartSchedulerTimer() {
+    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    this.schedulerTimer = setInterval(() => this.pollScheduler(), POLL_INTERVAL_MS);
+  }
+
+  private pollScheduler() {
+    if (!this.videoElement || !this.isStarted) return;
+    this.rebuildQueue('poll');
+  }
+
+  private rebuildQueue(_reason: string) {
     if (!this.videoElement || !this.isStarted) return;
 
     const neededChunks = this.getNeededChunks();
     const now = Date.now();
-    const pending: number[] = [];
-    const cachedChunks: number[] = [];
-    const deferredChunks: number[] = [];
+    const pending: ChunkRequest[] = [];
+    const pendingKeys = new Set<string>();
     let nextRetryAt = Infinity;
 
-    for (const chunkIndex of neededChunks) {
-      if (this.cache.has(chunkIndex)) {
-        cachedChunks.push(chunkIndex);
+    for (const chunk of neededChunks) {
+      if (pendingKeys.has(chunk.key)) continue;
+
+      if (this.cache.has(chunk.key)) {
         continue;
       }
 
-      if (chunkIndex === this.activeChunk?.index) continue;
+      if (chunk.key === this.activeChunk?.key) continue;
 
-      const retryAt = this.retryAfterByChunk.get(chunkIndex);
+      if (!this.isChunkBuffered(chunk)) {
+        continue;
+      }
+
+      const retryAt = this.retryAfterByChunk.get(chunk.index);
       if (retryAt && retryAt > now) {
         nextRetryAt = Math.min(nextRetryAt, retryAt);
-        deferredChunks.push(chunkIndex);
         continue;
       }
 
-      if (retryAt) this.retryAfterByChunk.delete(chunkIndex);
-      pending.push(chunkIndex);
+      if (retryAt) this.retryAfterByChunk.delete(chunk.index);
+      pending.push(chunk);
+      pendingKeys.add(chunk.key);
     }
 
     if (!arraysEqual(this.pendingQueue, pending)) {
       this.pendingQueue = pending;
-      console.debug('[Mute.ly AOT] Queue rebuilt', {
-        reason,
-        currentTime: this.videoElement.currentTime,
-        bufferedDuration: this.bufferedDuration,
-        activeChunk: this.activeChunk?.index ?? null,
-        cachedChunks,
-        deferredChunks,
-        pendingQueue: [...this.pendingQueue],
-      });
     }
 
     this.scheduleRetryRebuild(nextRetryAt);
@@ -304,12 +350,11 @@ export class AotPipeline {
     const playbackRate = this.videoElement.playbackRate || 1;
     const lookahead = playbackRate > 1.25 ? LOOKAHEAD_CHUNKS + 1 : LOOKAHEAD_CHUNKS;
     const maxChunk = Math.min(currentChunk + lookahead, lastChunk);
-    const neededChunks: number[] = [];
+    const neededChunks: ChunkRequest[] = [];
 
     for (let chunkIndex = currentChunk; chunkIndex <= maxChunk; chunkIndex++) {
       if (chunkIndex < 0) continue;
-      if (!this.isChunkBuffered(chunkIndex)) break;
-      neededChunks.push(chunkIndex);
+      neededChunks.push(this.getChunkWindow(chunkIndex));
     }
 
     return neededChunks;
@@ -319,15 +364,22 @@ export class AotPipeline {
     return Math.max(0, Math.floor(timeSeconds / CHUNK_STRIDE_SECONDS));
   }
 
-  private isChunkBuffered(chunkIndex: number) {
+  private getChunkWindow(chunkIndex: number): ChunkRequest {
+    const startTime = chunkIndex * CHUNK_STRIDE_SECONDS;
+    const endTime = Math.min(startTime + CHUNK_DURATION_SECONDS, this.getEffectiveDuration());
     const ownedEnd = this.getOwnedEnd(chunkIndex);
-    const effectiveDuration = this.getEffectiveDuration();
-    const isFinalChunk = Number.isFinite(effectiveDuration) && ownedEnd >= effectiveDuration;
-    if (isFinalChunk && ownedEnd <= this.bufferedDuration + FINAL_CHUNK_BUFFER_TOLERANCE_SECONDS) {
-      return true;
-    }
 
-    return ownedEnd <= this.bufferedDuration;
+    return {
+      key: getChunkKey(startTime, endTime),
+      index: chunkIndex,
+      startTime,
+      endTime,
+      ownedEnd,
+    };
+  }
+
+  private isChunkBuffered(chunk: ChunkRequest) {
+    return chunk.endTime <= this.bufferedDuration;
   }
 
   private getOwnedEnd(chunkIndex: number) {
@@ -349,38 +401,30 @@ export class AotPipeline {
   private async processNextChunk() {
     if (!this.isStarted || this.isProcessing) return;
 
-    const chunkIndex = this.pendingQueue.shift();
-    if (chunkIndex === undefined) return;
+    const chunk = this.pendingQueue.shift();
+    if (chunk === undefined) return;
 
-    if (this.cache.has(chunkIndex)) {
+    if (this.cache.has(chunk.key)) {
       queueMicrotask(() => this.processNextChunk());
       return;
     }
 
+    if (!this.isChunkBuffered(chunk)) {
+      queueMicrotask(() => this.rebuildQueue('dispatch-buffer-wait'));
+      return;
+    }
+
     const sessionId = this.sessionId;
-    const startTime = chunkIndex * CHUNK_STRIDE_SECONDS;
-    const endTime = Math.min(startTime + CHUNK_DURATION_SECONDS, this.audioDuration);
-    const ownedEnd = this.getOwnedEnd(chunkIndex);
+    const seekGeneration = this.seekGeneration;
+    const { index: chunkIndex, startTime, endTime, ownedEnd } = chunk;
 
     this.isProcessing = true;
-    this.activeChunk = { index: chunkIndex, startTime, endTime, ownedEnd };
-    console.debug('[Mute.ly AOT] Processing chunk', {
-      chunkIndex,
-      startTime,
-      endTime,
-      ownedEnd,
-      bufferedDuration: this.bufferedDuration,
-    });
+    this.activeChunk = { ...chunk, seekGeneration };
 
     try {
       const result = await this.client.transcribeAOT(startTime, endTime);
 
-      if (!this.isStarted || sessionId !== this.sessionId) {
-        console.debug('[Mute.ly AOT] Discarding stale chunk result', {
-          chunkIndex,
-          sessionId,
-          currentSessionId: this.sessionId,
-        });
+      if (!this.isStarted || sessionId !== this.sessionId || seekGeneration !== this.seekGeneration) {
         return;
       }
 
@@ -389,30 +433,20 @@ export class AotPipeline {
           const retryAt = Date.now() + DROPPED_CHUNK_RETRY_DELAY_MS;
           this.retryAfterByChunk.set(chunkIndex, retryAt);
         }
-        console.debug('[Mute.ly AOT] Chunk dropped', {
-          chunkIndex,
-          reason: result.dropReason ?? 'unknown',
-          retryable: result.dropReason !== 'aborted',
-        });
         return;
       }
 
       const captions = this.parseCaptions(result, startTime, ownedEnd);
       this.retryAfterByChunk.delete(chunkIndex);
-      this.cache.set(chunkIndex, captions);
-      console.debug('[Mute.ly AOT] Chunk cached', {
-        chunkIndex,
-        captionCount: captions.length,
-      });
+      this.cache.set(chunk, captions);
 
       this.renderCaptions();
     } catch (error) {
       if (this.isStarted && sessionId === this.sessionId) {
-        console.error(`[Mute.ly AOT] Chunk ${chunkIndex} failed:`, error);
+        console.error(`[mutely:aot] Chunk ${chunk.key} failed:`, error);
       }
     } finally {
       if (sessionId === this.sessionId) {
-        console.debug('[Mute.ly AOT] Active chunk released', { chunkIndex });
         this.activeChunk = null;
         this.isProcessing = false;
         this.rebuildQueue('chunk-complete');
@@ -429,7 +463,8 @@ export class AotPipeline {
         if (!chunk.text || !Array.isArray(chunk.timestamp)) continue;
 
         const text = chunk.text.trim();
-        if (!text || isHallucination(text)) continue;
+        if (!text) continue;
+        if (isHallucination(text)) continue;
 
         const relativeStart = toFiniteNumber(chunk.timestamp[0], 0);
         const relativeEnd = toFiniteNumber(chunk.timestamp[1], relativeStart + MIN_CAPTION_DURATION_SECONDS);
@@ -456,7 +491,8 @@ export class AotPipeline {
     if (!this.videoElement || !this.isStarted) return;
     this.lastPlaybackTime = this.videoElement.currentTime;
 
-    const match = this.cache.find(this.videoElement.currentTime);
+    const currentTime = this.videoElement.currentTime;
+    const match = this.cache.find(currentTime);
     if (match) {
       if (match.text !== this.lastText) {
         this.onCaption(match.text, false);
@@ -481,10 +517,6 @@ export class AotPipeline {
 
   private clearRenderedCaption() {
     if (!this.lastText) return;
-    console.debug('[Mute.ly AOT] Caption cleared', {
-      currentTime: this.videoElement?.currentTime ?? null,
-      reason: 'no-active-caption',
-    });
     this.onCaption('', false);
     this.lastText = '';
   }
@@ -643,11 +675,15 @@ function toFiniteNumber(value: number | null | undefined, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function arraysEqual(left: number[], right: number[]) {
+function getChunkKey(startTime: number, endTime: number) {
+  return `${Math.round(startTime * 10)}_${Math.round(endTime * 10)}`;
+}
+
+function arraysEqual(left: ChunkRequest[], right: ChunkRequest[]) {
   if (left.length !== right.length) return false;
 
   for (let i = 0; i < left.length; i++) {
-    if (left[i] !== right[i]) return false;
+    if (left[i].key !== right[i].key) return false;
   }
 
   return true;

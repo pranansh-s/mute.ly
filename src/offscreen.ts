@@ -6,7 +6,12 @@
  * worker job at a time and routes results back to the originating tab/client.
  */
 
-import type { OffscreenCommand, OffscreenEvent, SpeechActivityWindow, WhisperModelKind } from './core/types';
+import type {
+  OffscreenCommand,
+  OffscreenEvent,
+  SpeechActivityWindow,
+  WhisperModelKind,
+} from './core/types';
 import { AotStreamDecoder, type TranscribeAOTRequest } from './core/audio/aot-stream-decoder';
 
 import { preprocessAudio } from './core/audio/audio-preprocessor';
@@ -66,20 +71,24 @@ const decoder = new AotStreamDecoder(
     speechActivity: request.speechActivity,
     modelKind: request.modelKind,
   }),
-  (request) => send({
-    type: 'result',
-    id: request.id,
-    tabId: request.tabId ?? activeAotOwner?.tabId,
-    clientId: request.clientId ?? activeAotOwner?.clientId,
-    result: { text: '' },
-  }),
-  (request) => send({
-    type: 'result',
-    id: request.id,
-    tabId: request.tabId ?? activeAotOwner?.tabId,
-    clientId: request.clientId ?? activeAotOwner?.clientId,
-    result: { dropped: true, dropReason: 'audio-unavailable' },
-  })
+  (request) => {
+    send({
+      type: 'result',
+      id: request.id,
+      tabId: request.tabId ?? activeAotOwner?.tabId,
+      clientId: request.clientId ?? activeAotOwner?.clientId,
+      result: { text: '' },
+    });
+  },
+  (request) => {
+    send({
+      type: 'result',
+      id: request.id,
+      tabId: request.tabId ?? activeAotOwner?.tabId,
+      clientId: request.clientId ?? activeAotOwner?.clientId,
+      result: { dropped: true, dropReason: 'audio-unavailable' },
+    });
+  }
 );
 
 chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
@@ -163,7 +172,7 @@ function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
 }
 
 function handleWorkerError(e: ErrorEvent) {
-  console.error('[Offscreen] Worker error:', e);
+  console.error('[mutely:offscreen] Worker error:', e);
 
   send({
     type: 'error',
@@ -226,7 +235,7 @@ function armModelLoadWatchdog(modelKind: WhisperModelKind) {
   modelStatus.watchdog = setTimeout(() => {
     if (modelStatus.state !== 'loading') return;
 
-    console.error('[Offscreen] Model load stalled; restarting Whisper worker.');
+    console.error('[mutely:offscreen] Model load stalled; restarting Whisper worker.');
     send({ type: 'error', message: 'Model load stalled. Please try again.', modelKind });
     restartWorker('model-load-stalled');
   }, MODEL_LOAD_STALL_MS);
@@ -239,16 +248,26 @@ function clearModelLoadWatchdog(modelKind: WhisperModelKind) {
   modelStatus.watchdog = null;
 }
 
-function restartWorker(reason: string) {
-  console.warn(`[Mute.ly Offscreen] Restarting Whisper worker: ${reason}`);
+function restartWorker(reason: string, preserveQueuedJobs = false) {
+  console.warn(`[mutely:offscreen] Restarting Whisper worker: ${reason}`);
   clearActiveWorkerJobWatchdog();
   for (const modelStatus of modelStates.values()) {
     if (modelStatus.watchdog) clearTimeout(modelStatus.watchdog);
   }
   modelStates.clear();
-  dropWorkerJobs();
+
+  if (preserveQueuedJobs) {
+    if (activeWorkerJob) {
+      sendDropped(activeWorkerJob);
+      activeWorkerJob = null;
+    }
+  } else {
+    dropWorkerJobs();
+  }
+
   worker.terminate();
   worker = createWorker();
+  if (preserveQueuedJobs) pumpWorkerQueue();
 }
 
 function getModelStatus(modelKind: WhisperModelKind) {
@@ -324,7 +343,7 @@ function abortActiveAotJob(clientId?: string) {
 
 function abortJob(id: number, clientId: string) {
   if (activeWorkerJob?.id === id && activeWorkerJob.clientId === clientId) {
-    worker.postMessage({ type: 'abort_chunk', id });
+    restartWorker(`aot-job-abort-${id}`, true);
     return;
   }
 
@@ -406,6 +425,6 @@ function keepOffscreenAlive() {
     
     osc.start();
   } catch (err) {
-    console.warn('[Mute.ly Offscreen] Failed to start silent keep-alive loop:', err);
+    console.warn('[mutely:offscreen] Failed to start silent keep-alive loop:', err);
   }
 }
