@@ -1,6 +1,6 @@
-# Mute.ly
-
 <div align="center">
+   
+# Mute.ly
 
 <img src="assets/banner.gif" alt="Mute.ly Banner" width="100%" />
 
