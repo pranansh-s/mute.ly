@@ -14,9 +14,9 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: false,
     lib: {
-      entry: resolve(__dirname, 'src/whisper-worker.ts'),
+      entry: resolve(__dirname, 'src/asr-worker.ts'),
       formats: ['es'],
-      fileName: () => 'whisper-worker.js',
+      fileName: () => 'asr-worker.js',
     },
     rollupOptions: {
       output: {

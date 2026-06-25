@@ -1,19 +1,18 @@
 /**
- * Mute.ly Offscreen Audio Decoder
+ * Mute.ly Offscreen ASR host
  *
- * The offscreen document owns the VOD PCM stream and the physical Whisper worker.
- * Scheduling policy stays in the content-side AOT pipeline; this file gates one
- * worker job at a time and routes results back to the originating tab/client.
+ * Owns the AOT PCM stream and the ASR worker. Scheduling lives in the
+ * content-side AOT pipeline / live streamer; this file gates one worker job
+ * at a time and routes results back to the originating tab/client.
  */
 
 import type {
+  AsrDevice,
+  AsrMode,
   OffscreenCommand,
   OffscreenEvent,
-  SpeechActivityWindow,
-  WhisperModelKind,
 } from './core/types';
 import { AotStreamDecoder, type TranscribeAOTRequest } from './core/audio/aot-stream-decoder';
-
 import { preprocessAudio } from './core/audio/audio-preprocessor';
 
 type RoutedCommand = OffscreenCommand & {
@@ -27,14 +26,13 @@ interface AotOwner {
 }
 
 interface WorkerJob {
-  mode: 'aot' | 'jit';
+  kind: 'transcribe_aot' | 'transcribe_live';
   audio: Float32Array | number[];
   id: number;
-  return_timestamps?: boolean;
+  sessionId?: number;
   clientId?: string;
   tabId?: number;
-  speechActivity?: SpeechActivityWindow[];
-  modelKind: WhisperModelKind;
+  mode: AsrMode;
 }
 
 type ModelState = 'idle' | 'loading' | 'ready';
@@ -45,15 +43,18 @@ interface ModelStatusState {
 }
 
 const MODEL_LOAD_STALL_MS = 300_000;
-const JIT_WORKER_TIMEOUT_MS = 20_000;
+const LIVE_WORKER_TIMEOUT_MS = 20_000;
 const AOT_WORKER_TIMEOUT_MS = 330_000;
+const NATIVE_HOST_NAME = 'com.mutely.host';
 
 let worker = createWorker();
+let currentDevice: AsrDevice | null = null;
 let activeWorkerJob: WorkerJob | null = null;
 let activeWorkerJobWatchdog: ReturnType<typeof setTimeout> | null = null;
 let workerQueue: WorkerJob[] = [];
 let activeAotOwner: AotOwner | null = null;
-const modelStates = new Map<WhisperModelKind, ModelStatusState>();
+let nativePort: chrome.runtime.Port | null = null;
+const modelStates = new Map<AsrMode, ModelStatusState>();
 
 keepOffscreenAlive();
 
@@ -62,14 +63,12 @@ const decoder = new AotStreamDecoder(
   (duration) => send(ownerEvent({ type: 'aot_audio_ready', duration })),
   (message) => send(ownerEvent({ type: 'error', message })),
   (audio, request) => enqueueWorkerJob({
-    mode: 'aot',
+    kind: 'transcribe_aot',
     audio,
     id: request.id,
-    return_timestamps: request.return_timestamps,
     tabId: request.tabId ?? activeAotOwner?.tabId,
     clientId: request.clientId ?? activeAotOwner?.clientId,
-    speechActivity: request.speechActivity,
-    modelKind: request.modelKind,
+    mode: request.mode,
   }),
   (request) => {
     send({
@@ -96,15 +95,18 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
 
   switch (msg.type) {
     case 'load':
-      requestModelLoad(msg.modelKind);
+      requestModelLoad(msg.mode);
       break;
     case 'load_aot':
       stopAotForClient();
       activeAotOwner = { tabId: msg.tabId, clientId: msg.clientId };
-      decoder.loadStream(msg.url);
+      startNativeStream(msg.videoId);
       break;
     case 'stop_aot':
       stopAotForClient(msg.clientId);
+      break;
+    case 'host_probe':
+      probeNativeHost(msg.tabId, msg.clientId);
       break;
     case 'abort_job':
       abortJob(msg.id, msg.clientId);
@@ -112,27 +114,28 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
     case 'transcribe_aot':
       if (msg.clientId !== activeAotOwner?.clientId) {
         sendDropped({
-          mode: 'aot',
+          kind: 'transcribe_aot',
           audio: [],
           id: msg.id,
           tabId: msg.tabId,
           clientId: msg.clientId,
-          modelKind: msg.modelKind,
+          mode: msg.mode,
         });
         break;
       }
       decoder.transcribeSlice(msg as unknown as TranscribeAOTRequest);
       break;
-    case 'transcribe': {
+    case 'transcribe_live': {
       const floatAudio = new Float32Array(msg.audio);
       preprocessAudio(floatAudio);
       enqueueWorkerJob({
-        mode: 'jit',
+        kind: 'transcribe_live',
         audio: Array.from(floatAudio),
         id: msg.id,
+        sessionId: msg.sessionId,
         tabId: msg.tabId,
         clientId: msg.clientId,
-        modelKind: msg.modelKind,
+        mode: msg.mode,
       });
       break;
     }
@@ -140,7 +143,7 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
 });
 
 function createWorker() {
-  const nextWorker = new Worker('whisper-worker.js', { type: 'module' });
+  const nextWorker = new Worker('asr-worker.js', { type: 'module' });
   nextWorker.onmessage = handleWorkerMessage;
   nextWorker.onerror = handleWorkerError;
   return nextWorker;
@@ -148,6 +151,12 @@ function createWorker() {
 
 function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
   const msg = e.data;
+
+  if (msg.type === 'device') {
+    currentDevice = msg.device;
+    send(msg);
+    return;
+  }
 
   if (msg.type !== 'result') {
     updateModelStateFromWorker(msg);
@@ -163,9 +172,7 @@ function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
     ...msg,
     tabId: msg.tabId ?? finishedJob?.tabId,
     clientId: msg.clientId ?? finishedJob?.clientId,
-    result: finishedJob?.speechActivity
-      ? { ...msg.result, speechActivity: finishedJob.speechActivity }
-      : msg.result,
+    sessionId: msg.sessionId ?? finishedJob?.sessionId,
   });
 
   pumpWorkerQueue();
@@ -173,95 +180,101 @@ function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
 
 function handleWorkerError(e: ErrorEvent) {
   console.error('[mutely:offscreen] Worker error:', e);
-
   send({
     type: 'error',
     message: 'Worker crash',
     tabId: activeWorkerJob?.tabId,
     clientId: activeWorkerJob?.clientId,
   });
-
   restartWorker('worker-error');
 }
 
-function requestModelLoad(modelKind: WhisperModelKind) {
-  const modelStatus = getModelStatus(modelKind);
+function requestModelLoad(mode: AsrMode) {
+  const modelStatus = getModelStatus(mode);
 
   if (modelStatus.state === 'ready') {
-    send({ type: 'ready', modelKind });
+    send({ type: 'ready', mode, device: currentDevice ?? undefined });
     return;
   }
 
   if (modelStatus.state === 'loading') {
-    send({ type: 'loading', progress: modelStatus.progress, modelKind });
-    armModelLoadWatchdog(modelKind);
+    send({ type: 'loading', progress: modelStatus.progress, mode });
+    armModelLoadWatchdog(mode);
     return;
   }
 
   modelStatus.state = 'loading';
   modelStatus.progress = 0;
-  armModelLoadWatchdog(modelKind);
-  worker.postMessage({ type: 'load', modelKind });
+  armModelLoadWatchdog(mode);
+  worker.postMessage({ type: 'load', mode });
 }
 
 function updateModelStateFromWorker(msg: OffscreenEvent) {
   if (msg.type !== 'loading' && msg.type !== 'ready' && msg.type !== 'error') return;
 
-  const modelKind = 'modelKind' in msg && msg.modelKind ? msg.modelKind : 'base';
-  const modelStatus = getModelStatus(modelKind);
+  const mode = ('mode' in msg && msg.mode ? msg.mode : 'vod') as AsrMode;
+  const modelStatus = getModelStatus(mode);
 
   switch (msg.type) {
     case 'loading':
       modelStatus.state = 'loading';
       modelStatus.progress = msg.progress;
-      armModelLoadWatchdog(modelKind);
+      armModelLoadWatchdog(mode);
       break;
     case 'ready':
       modelStatus.state = 'ready';
       modelStatus.progress = 100;
-      clearModelLoadWatchdog(modelKind);
+      clearModelLoadWatchdog(mode);
       break;
     case 'error':
       modelStatus.state = 'idle';
-      clearModelLoadWatchdog(modelKind);
+      clearModelLoadWatchdog(mode);
       break;
   }
 }
 
-function armModelLoadWatchdog(modelKind: WhisperModelKind) {
-  clearModelLoadWatchdog(modelKind);
-  const modelStatus = getModelStatus(modelKind);
+function armModelLoadWatchdog(mode: AsrMode) {
+  clearModelLoadWatchdog(mode);
+  const modelStatus = getModelStatus(mode);
 
   modelStatus.watchdog = setTimeout(() => {
     if (modelStatus.state !== 'loading') return;
-
-    console.error('[mutely:offscreen] Model load stalled; restarting Whisper worker.');
-    send({ type: 'error', message: 'Model load stalled. Please try again.', modelKind });
+    console.error('[mutely:offscreen] Model load stalled; restarting ASR worker.');
+    send({ type: 'error', message: 'Model load stalled. Please try again.', mode });
     restartWorker('model-load-stalled');
   }, MODEL_LOAD_STALL_MS);
 }
 
-function clearModelLoadWatchdog(modelKind: WhisperModelKind) {
-  const modelStatus = getModelStatus(modelKind);
+function clearModelLoadWatchdog(mode: AsrMode) {
+  const modelStatus = getModelStatus(mode);
   if (!modelStatus.watchdog) return;
   clearTimeout(modelStatus.watchdog);
   modelStatus.watchdog = null;
 }
 
 function restartWorker(reason: string, preserveQueuedJobs = false) {
-  console.warn(`[mutely:offscreen] Restarting Whisper worker: ${reason}`);
+  console.warn(`[mutely:offscreen] Restarting ASR worker: ${reason}`);
   clearActiveWorkerJobWatchdog();
-  for (const modelStatus of modelStates.values()) {
-    if (modelStatus.watchdog) clearTimeout(modelStatus.watchdog);
-  }
-  modelStates.clear();
 
   if (preserveQueuedJobs) {
+    // Soft restart — keep queue + model state cache. Worker re-instantiates the
+    // pipeline from browser HTTP cache on next request.
     if (activeWorkerJob) {
       sendDropped(activeWorkerJob);
       activeWorkerJob = null;
     }
+    for (const modelStatus of modelStates.values()) {
+      if (modelStatus.watchdog) clearTimeout(modelStatus.watchdog);
+      modelStatus.state = 'idle';
+      modelStatus.progress = 0;
+      modelStatus.watchdog = null;
+    }
   } else {
+    for (const modelStatus of modelStates.values()) {
+      if (modelStatus.watchdog) clearTimeout(modelStatus.watchdog);
+    }
+    modelStates.clear();
+    currentDevice = null;
     dropWorkerJobs();
   }
 
@@ -270,11 +283,11 @@ function restartWorker(reason: string, preserveQueuedJobs = false) {
   if (preserveQueuedJobs) pumpWorkerQueue();
 }
 
-function getModelStatus(modelKind: WhisperModelKind) {
-  let modelStatus = modelStates.get(modelKind);
+function getModelStatus(mode: AsrMode) {
+  let modelStatus = modelStates.get(mode);
   if (!modelStatus) {
     modelStatus = { state: 'idle', progress: 0, watchdog: null };
-    modelStates.set(modelKind, modelStatus);
+    modelStates.set(mode, modelStatus);
   }
   return modelStatus;
 }
@@ -292,26 +305,25 @@ function pumpWorkerQueue() {
   armActiveWorkerJobWatchdog(job);
 
   worker.postMessage({
-    type: 'transcribe',
+    type: job.kind,
     audio: job.audio,
     id: job.id,
+    sessionId: job.sessionId,
     tabId: job.tabId,
     clientId: job.clientId,
-    return_timestamps: job.return_timestamps,
-    modelKind: job.modelKind,
+    mode: job.mode,
   });
 }
 
 function armActiveWorkerJobWatchdog(job: WorkerJob) {
   clearActiveWorkerJobWatchdog();
-  const timeoutMs = job.mode === 'jit' ? JIT_WORKER_TIMEOUT_MS : AOT_WORKER_TIMEOUT_MS;
+  const timeoutMs = job.kind === 'transcribe_live' ? LIVE_WORKER_TIMEOUT_MS : AOT_WORKER_TIMEOUT_MS;
 
   activeWorkerJobWatchdog = setTimeout(() => {
     if (activeWorkerJob?.id !== job.id) return;
-
-    sendDropped({ ...job, mode: job.mode });
+    sendDropped(job);
     activeWorkerJob = null;
-    restartWorker(`${job.mode}-job-timeout`);
+    restartWorker(`${job.kind}-timeout`);
     pumpWorkerQueue();
   }, timeoutMs);
 }
@@ -325,6 +337,7 @@ function clearActiveWorkerJobWatchdog() {
 function stopAotForClient(clientId?: string) {
   if (!clientId || activeAotOwner?.clientId === clientId) {
     decoder.cancelStream();
+    disconnectNativePort();
     activeAotOwner = null;
   }
 
@@ -332,9 +345,117 @@ function stopAotForClient(clientId?: string) {
   abortActiveAotJob(clientId);
 }
 
+function startNativeStream(videoId: string) {
+  disconnectNativePort();
+  decoder.beginStream();
+
+  let port: chrome.runtime.Port;
+  try {
+    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    decoder.failStream(`NO_NATIVE_HOST: ${message}`);
+    return;
+  }
+
+  nativePort = port;
+
+  port.onMessage.addListener((msg: { type?: string; chunk?: string; durationSeconds?: number; message?: string; code?: string }) => {
+    if (port !== nativePort) return;
+    if (!msg || typeof msg.type !== 'string') return;
+
+    if (msg.type === 'pcm' && typeof msg.chunk === 'string') {
+      decoder.feed(decodeBase64(msg.chunk));
+      return;
+    }
+    if (msg.type === 'end') {
+      decoder.finalizeStream(msg.durationSeconds);
+      disconnectNativePort();
+      return;
+    }
+    if (msg.type === 'error') {
+      const code = msg.code ?? 'NATIVE_HOST_ERROR';
+      decoder.failStream(`${code}: ${msg.message ?? 'native host error'}`);
+      disconnectNativePort();
+      return;
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (port !== nativePort) return;
+    nativePort = null;
+    const lastError = chrome.runtime.lastError;
+    if (lastError) {
+      decoder.failStream(`NO_NATIVE_HOST: ${lastError.message ?? 'native host disconnected'}`);
+    } else {
+      decoder.finalizeStream();
+    }
+  });
+
+  try {
+    port.postMessage({ type: 'start', videoId });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    decoder.failStream(`NO_NATIVE_HOST: ${message}`);
+    disconnectNativePort();
+  }
+}
+
+function disconnectNativePort() {
+  if (!nativePort) return;
+  const port = nativePort;
+  nativePort = null;
+  try { port.postMessage({ type: 'stop' }); } catch {}
+  try { port.disconnect(); } catch {}
+}
+
+function probeNativeHost(tabId?: number, clientId?: string) {
+  let port: chrome.runtime.Port;
+  try {
+    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'host_status', ok: false, reason: `NO_NATIVE_HOST: ${message}`, tabId, clientId });
+    return;
+  }
+
+  let resolved = false;
+  const resolve = (ok: boolean, reason?: string) => {
+    if (resolved) return;
+    resolved = true;
+    try { port.disconnect(); } catch {}
+    send({ type: 'host_status', ok, reason, tabId, clientId });
+  };
+
+  port.onMessage.addListener((msg: { type?: string }) => {
+    if (msg?.type === 'pong') resolve(true);
+  });
+
+  port.onDisconnect.addListener(() => {
+    const lastError = chrome.runtime.lastError;
+    resolve(false, `NO_NATIVE_HOST: ${lastError?.message ?? 'disconnected'}`);
+  });
+
+  try {
+    port.postMessage({ type: 'ping' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    resolve(false, `NO_NATIVE_HOST: ${message}`);
+  }
+
+  setTimeout(() => resolve(false, 'NO_NATIVE_HOST: probe timeout'), 4000);
+}
+
+function decodeBase64(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
 function abortActiveAotJob(clientId?: string) {
   if (
-    activeWorkerJob?.mode === 'aot' &&
+    activeWorkerJob?.kind === 'transcribe_aot' &&
     (!clientId || activeWorkerJob.clientId === clientId)
   ) {
     worker.postMessage({ type: 'abort_chunk', id: activeWorkerJob.id });
@@ -343,7 +464,10 @@ function abortActiveAotJob(clientId?: string) {
 
 function abortJob(id: number, clientId: string) {
   if (activeWorkerJob?.id === id && activeWorkerJob.clientId === clientId) {
-    restartWorker(`aot-job-abort-${id}`, true);
+    // Cooperative abort: worker's callback_function throws ABORTED on the next
+    // token, returns dropped:true via the normal result path, handleWorkerMessage
+    // clears state + pumps queue. No worker restart needed.
+    worker.postMessage({ type: 'abort_chunk', id });
     return;
   }
 
@@ -362,7 +486,7 @@ function dropQueuedAotJobs(clientId?: string) {
   const remainingQueue: WorkerJob[] = [];
 
   for (const job of workerQueue) {
-    if (job.mode === 'aot' && (!clientId || job.clientId === clientId)) {
+    if (job.kind === 'transcribe_aot' && (!clientId || job.clientId === clientId)) {
       sendDropped(job);
     } else {
       remainingQueue.push(job);
@@ -378,10 +502,7 @@ function dropWorkerJobs() {
     activeWorkerJob = null;
   }
 
-  for (const job of workerQueue) {
-    sendDropped(job);
-  }
-
+  for (const job of workerQueue) sendDropped(job);
   workerQueue = [];
 }
 
@@ -389,6 +510,7 @@ function sendDropped(job: WorkerJob) {
   send({
     type: 'result',
     id: job.id,
+    sessionId: job.sessionId,
     tabId: job.tabId,
     clientId: job.clientId,
     result: { dropped: true, dropReason: 'offscreen-dropped' },
@@ -396,7 +518,9 @@ function sendDropped(job: WorkerJob) {
 }
 
 function send(msg: OffscreenEvent) {
-  chrome.runtime.sendMessage({ ...msg, _fromOffscreen: true }).catch(() => {});
+  chrome.runtime.sendMessage({ ...msg, _fromOffscreen: true }).catch(err => {
+    console.warn('[mutely:offscreen] sendMessage failed:', err);
+  });
 }
 
 function ownerEvent<T extends OffscreenEvent>(msg: T): T {
@@ -408,6 +532,9 @@ function ownerEvent<T extends OffscreenEvent>(msg: T): T {
   } as T;
 }
 
+// ponytail: 1Hz silent oscillator keeps MV3 offscreen alive across long idle.
+// Chrome 116+ retains offscreen while an AudioContext lives; this is that
+// hook. Cheaper than re-creating offscreen + worker on every wake.
 function keepOffscreenAlive() {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -415,14 +542,13 @@ function keepOffscreenAlive() {
     const ctx = new AudioContextClass();
     const osc = ctx.createOscillator();
     const gainNode = ctx.createGain();
-    
+
     osc.type = 'sine';
     osc.frequency.setValueAtTime(1, ctx.currentTime);
     gainNode.gain.setValueAtTime(0.001, ctx.currentTime);
-    
+
     osc.connect(gainNode);
     gainNode.connect(ctx.destination);
-    
     osc.start();
   } catch (err) {
     console.warn('[mutely:offscreen] Failed to start silent keep-alive loop:', err);

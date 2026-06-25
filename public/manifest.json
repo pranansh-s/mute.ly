@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Mute.ly",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Free, private YouTube captions powered by local AI — no server, no API keys, no data ever leaves your browser",
   "permissions": [
-    "offscreen"
+    "offscreen",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "https://youtube.com/*",
-    "http://localhost:3000/*"
+    "https://youtube.com/*"
   ],
   "background": {
     "service_worker": "background.js",

@@ -1,11 +1,12 @@
-import type { ModelStatus, OffscreenEvent, TranscriptionResult, WhisperModelKind } from '../types';
+import type { AsrDevice, AsrMode, ModelStatus, OffscreenEvent, TranscriptionResult } from '../types';
 
 const AOT_CHUNK_TIMEOUT_MS = 300_000;
-const BACKUP_JIT_TIMEOUT_MS = 25_000;
+const LIVE_TIMEOUT_MS = 25_000;
 
-interface PendingJitResult {
+interface PendingLiveResult {
+  sessionId: number;
   resolve: (result: TranscriptionResult) => void;
-  timer?: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface ActiveAotResult {
@@ -19,35 +20,64 @@ export class OffscreenClient {
   private readonly clientId = createClientId();
   private isDestroyed = false;
   private aotStarted = false;
-  private requestedModelKind: WhisperModelKind = 'base';
+  private requestedMode: AsrMode = 'vod';
   private activeAot: ActiveAotResult | null = null;
-  private pendingJitResults = new Map<number, PendingJitResult>();
+  private pendingLiveResults = new Map<number, PendingLiveResult>();
 
   public onStatusChange?: (status: ModelStatus) => void;
   public onLoadProgress?: (progress: number) => void;
   public onAotBufferProgress?: (seconds: number) => void;
   public onAotReady?: (duration: number) => void;
+  public onDeviceChange?: (device: AsrDevice) => void;
 
   constructor() {
     chrome.runtime.onMessage.addListener(this.handleMessage);
   }
 
-  public initialize(modelKind: WhisperModelKind) {
+  public initialize(mode: AsrMode) {
     if (this.isDestroyed) return;
-    this.requestedModelKind = modelKind;
+    this.requestedMode = mode;
     this.onStatusChange?.('loading');
-    this.sendToOffscreen({ type: 'load', clientId: this.clientId, modelKind }).catch((error) => {
+    this.sendToOffscreen({ type: 'load', clientId: this.clientId, mode }).catch((error) => {
       console.error('[mutely:engine] Failed to initialize offscreen model:', error);
       this.onStatusChange?.('error');
     });
   }
 
-  public startAOT(url: string) {
+  public startAOT(videoId: string) {
     if (this.isDestroyed) return;
     this.aotStarted = true;
-    this.sendToOffscreen({ type: 'load_aot', url, clientId: this.clientId }).catch((error) => {
+    this.sendToOffscreen({ type: 'load_aot', videoId, clientId: this.clientId }).catch((error) => {
       console.error('[mutely:aot] Failed to start AOT stream:', error);
       this.onStatusChange?.('error');
+    });
+  }
+
+  public probeHost(): Promise<{ ok: boolean; reason?: string }> {
+    if (this.isDestroyed) return Promise.resolve({ ok: false, reason: 'client destroyed' });
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: { ok: boolean; reason?: string }) => {
+        if (settled) return;
+        settled = true;
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve(result);
+      };
+
+      const listener = (msg: any) => {
+        if (!msg?._fromOffscreen) return;
+        if (msg.type !== 'host_status') return;
+        if (msg.clientId && msg.clientId !== this.clientId) return;
+        finish({ ok: !!msg.ok, reason: msg.reason });
+      };
+      chrome.runtime.onMessage.addListener(listener);
+
+      setTimeout(() => finish({ ok: false, reason: 'probe timeout' }), 5000);
+
+      this.sendToOffscreen({ type: 'host_probe', clientId: this.clientId }).catch((error) => {
+        finish({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+      });
     });
   }
 
@@ -67,38 +97,39 @@ export class OffscreenClient {
     this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }).catch((error) => {
       console.error('[mutely:aot] Failed to send abort_job request:', error);
     });
-
     this.settleActiveAot({ dropped: true, dropReason: 'aborted' });
   }
 
-  public async transcribeJIT(audio: Float32Array): Promise<TranscriptionResult> {
-    if (this.isDestroyed) return { text: '' };
+  public transcribeLive(audio: Float32Array, sessionId: number): Promise<TranscriptionResult> {
+    if (this.isDestroyed) return Promise.resolve({ text: '' });
 
     const id = this.messageId++;
     return new Promise<TranscriptionResult>((resolve) => {
       const timer = setTimeout(() => {
-        this.pendingJitResults.delete(id);
+        this.pendingLiveResults.delete(id);
         resolve({ text: '' });
-      }, BACKUP_JIT_TIMEOUT_MS);
+      }, LIVE_TIMEOUT_MS);
 
-      this.pendingJitResults.set(id, {
+      this.pendingLiveResults.set(id, {
+        sessionId,
         timer,
         resolve: (result) => {
           clearTimeout(timer);
-          this.pendingJitResults.delete(id);
+          this.pendingLiveResults.delete(id);
           resolve(result);
         },
       });
 
       this.sendToOffscreen({
-        type: 'transcribe',
+        type: 'transcribe_live',
         audio: Array.from(audio),
         id,
+        sessionId,
         clientId: this.clientId,
-        modelKind: 'tiny',
+        mode: 'live',
       }).catch((error) => {
         console.error('[mutely:engine] Failed to send live transcription request:', error);
-        const pending = this.pendingJitResults.get(id);
+        const pending = this.pendingLiveResults.get(id);
         if (pending) pending.resolve({ text: '' });
       });
     });
@@ -135,9 +166,8 @@ export class OffscreenClient {
         startTime,
         endTime,
         id,
-        return_timestamps: true,
         clientId: this.clientId,
-        modelKind: 'base',
+        mode: 'vod',
       }).catch((error) => {
         console.error('[mutely:aot] Failed to send AOT transcription request:', error);
         finish({ dropped: true, dropReason: 'send-failed' });
@@ -150,11 +180,11 @@ export class OffscreenClient {
     this.isDestroyed = true;
     chrome.runtime.onMessage.removeListener(this.handleMessage);
 
-    for (const pending of this.pendingJitResults.values()) {
-      if (pending.timer) clearTimeout(pending.timer);
+    for (const pending of this.pendingLiveResults.values()) {
+      clearTimeout(pending.timer);
       pending.resolve({ text: '' });
     }
-    this.pendingJitResults.clear();
+    this.pendingLiveResults.clear();
     this.settleActiveAot({ dropped: true });
   }
 
@@ -165,12 +195,16 @@ export class OffscreenClient {
 
     switch (msg.type) {
       case 'loading':
-        if (msg.modelKind && msg.modelKind !== this.requestedModelKind) return;
+        if (msg.mode && msg.mode !== this.requestedMode) return;
         this.onLoadProgress?.(msg.progress);
         break;
       case 'ready':
-        if (msg.modelKind && msg.modelKind !== this.requestedModelKind) return;
+        if (msg.mode && msg.mode !== this.requestedMode) return;
+        if (msg.device) this.onDeviceChange?.(msg.device);
         this.onStatusChange?.('ready');
+        break;
+      case 'device':
+        this.onDeviceChange?.(msg.device);
         break;
       case 'aot_buffer_progress':
         this.onAotBufferProgress?.(msg.bufferedSeconds);
@@ -179,7 +213,7 @@ export class OffscreenClient {
         this.onAotReady?.(msg.duration);
         break;
       case 'error':
-        if (msg.modelKind && msg.modelKind !== this.requestedModelKind) return;
+        if (msg.mode && msg.mode !== this.requestedMode) return;
         console.error('[mutely:engine] Error from offscreen:', msg.message);
         this.onStatusChange?.('error');
         break;
@@ -190,15 +224,14 @@ export class OffscreenClient {
   };
 
   private handleResult(id: number, result: TranscriptionResult) {
-    const pendingJit = this.pendingJitResults.get(id);
-    if (pendingJit) {
-      pendingJit.resolve(result);
+    const pendingLive = this.pendingLiveResults.get(id);
+    if (pendingLive) {
+      pendingLive.resolve(result);
       return;
     }
 
     if (this.activeAot?.id === id) {
       this.activeAot.resolve(result);
-      return;
     }
   }
 
@@ -207,7 +240,6 @@ export class OffscreenClient {
     this.activeAot.resolve(result);
   }
 
-  /** Wraps chrome.runtime.sendMessage with the target/data envelope expected by background.ts. */
   private async sendToOffscreen(data: Record<string, unknown>, allowAfterDestroy = false) {
     if (this.isDestroyed && !allowAfterDestroy) return;
     const response = await chrome.runtime.sendMessage({ target: 'offscreen', data });

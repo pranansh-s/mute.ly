@@ -34,11 +34,7 @@ export default defineConfig({
           dest: '.',
         },
         {
-          src: 'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
-          dest: 'assets',
-        },
-        {
-          src: 'node_modules/@ricky0123/vad-web/dist/*.onnx',
+          src: 'public/capture-worklet.js',
           dest: 'assets',
         },
         {
@@ -48,7 +44,19 @@ export default defineConfig({
         {
           src: 'node_modules/onnxruntime-web/dist/*.mjs',
           dest: 'assets',
-        }
+        },
+        {
+          src: 'node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx',
+          dest: 'assets',
+        },
+        {
+          src: 'node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx',
+          dest: 'assets',
+        },
+        {
+          src: 'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
+          dest: 'assets',
+        },
       ],
     }),
   ],

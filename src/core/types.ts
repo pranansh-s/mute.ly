@@ -1,49 +1,77 @@
 export type MonitorStatus = 'idle' | 'loading' | 'audio' | 'error';
 
-/** Status reported by the Whisper model lifecycle. */
 export type ModelStatus = 'loading' | 'ready' | 'error';
-export type WhisperModelKind = 'tiny' | 'base';
+
+export type AsrMode = 'live' | 'vod';
+export type AsrDevice = 'webgpu' | 'wasm';
 
 // ── Messages: Content → Background → Offscreen ─────────────────────
 
 export type OffscreenCommand =
-  | { type: 'load'; clientId?: string; modelKind: WhisperModelKind }
-  | { type: 'load_aot'; url: string; clientId: string }
+  | { type: 'load'; clientId?: string; mode: AsrMode }
+  | { type: 'load_aot'; videoId: string; clientId: string }
   | { type: 'stop_aot'; clientId: string }
   | { type: 'abort_job'; id: number; clientId: string }
-  | { type: 'transcribe'; audio: number[]; id: number; clientId: string; modelKind: WhisperModelKind }
+  | { type: 'host_probe'; clientId: string }
+  | {
+      type: 'transcribe_live';
+      audio: number[];
+      id: number;
+      sessionId: number;
+      clientId: string;
+      mode: AsrMode;
+    }
   | {
       type: 'transcribe_aot';
       startTime: number;
       endTime: number;
       id: number;
-      return_timestamps: boolean;
       clientId: string;
-      modelKind: WhisperModelKind;
+      mode: AsrMode;
     };
 
 // ── Messages: Offscreen → Background → Content ─────────────────────
 
 export type OffscreenEvent =
-  | { type: 'loading'; progress: number; modelKind?: WhisperModelKind }
-  | { type: 'ready'; modelKind?: WhisperModelKind }
+  | { type: 'loading'; progress: number; mode?: AsrMode }
+  | { type: 'ready'; mode?: AsrMode; device?: AsrDevice }
+  | { type: 'device'; device: AsrDevice }
   | { type: 'aot_buffer_progress'; bufferedSeconds: number; tabId?: number; clientId?: string }
   | { type: 'aot_audio_ready'; duration: number; tabId?: number; clientId?: string }
-  | { type: 'error'; message: string; modelKind?: WhisperModelKind; tabId?: number; clientId?: string }
+  | { type: 'host_status'; ok: boolean; reason?: string; tabId?: number; clientId?: string }
+  | { type: 'error'; message: string; mode?: AsrMode; tabId?: number; clientId?: string }
   | {
       type: 'result';
       id: number;
+      sessionId?: number;
       tabId?: number;
       clientId?: string;
       result: TranscriptionResult;
     };
 
-// ── Transcription result from the Whisper worker ────────────────────
+// ── Messages: Offscreen → ASR Worker ───────────────────────────────
+// Worker envelope is a superset of OffscreenCommand: offscreen adds tabId
+// for routing replies, and converts `abort_job` into the worker's local
+// `abort_chunk`. Keep this union in sync with `src/asr-worker.ts`.
+
+export type WorkerCommand =
+  | { type: 'load'; mode: AsrMode }
+  | { type: 'abort_chunk'; id: number }
+  | {
+      type: 'transcribe_live' | 'transcribe_aot';
+      audio: number[];
+      id: number;
+      sessionId?: number;
+      tabId?: number;
+      clientId?: string;
+      mode: AsrMode;
+    };
+
+// ── Transcription result from the ASR worker ────────────────────
 
 export interface TranscriptionResult {
   text?: string;
   chunks?: TranscriptionChunk[];
-  speechActivity?: SpeechActivityWindow[];
   dropped?: boolean;
   dropReason?: string;
 }
@@ -51,9 +79,4 @@ export interface TranscriptionResult {
 export interface TranscriptionChunk {
   text: string;
   timestamp: [number, number] | [number, null];
-}
-
-export interface SpeechActivityWindow {
-  start: number;
-  end: number;
 }

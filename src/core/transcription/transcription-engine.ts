@@ -1,11 +1,12 @@
 import { OffscreenClient } from './offscreen-client';
 import { AotPipeline } from './aot-pipeline';
 import { isHallucination } from './hallucination-filter';
-import type { ModelStatus, TranscriptionResult, WhisperModelKind } from '../types';
+import { splitCaptionFromText } from './caption-splitter';
+import type { AsrDevice, AsrMode, ModelStatus, TranscriptionResult } from '../types';
 
-type CaptionCallback = (text: string, isPartial: boolean) => void;
+type CaptionCallback = (committed: string, tentative: string) => void;
 
-const LIVE_CAPTION_CLEAR_DELAY_MS = 1200;
+const LIVE_CAPTION_CLEAR_DELAY_MS = 8000;
 
 export class TranscriptionEngine {
   private onCaption: CaptionCallback;
@@ -14,27 +15,26 @@ export class TranscriptionEngine {
 
   private isReady = false;
   private aotMode = false;
-  private isProcessing = false;
-  private pendingLiveAudio: Float32Array | null = null;
-  private lastText = '';
+  private liveSessionId = 0;
   private pendingVideoElement: HTMLVideoElement | null = null;
-  private speechEndTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveClearTimer: ReturnType<typeof setTimeout> | null = null;
   private isDestroyed = false;
-  private isLiveSpeechActive = false;
 
   public onStatusChange?: (status: ModelStatus) => void;
   public onLoadProgress?: (progress: number) => void;
+  public onDeviceChange?: (device: AsrDevice) => void;
 
   constructor(onCaption: CaptionCallback) {
     this.onCaption = onCaption;
     this.client = new OffscreenClient();
-    this.aotPipeline = new AotPipeline(this.client, onCaption);
+    this.aotPipeline = new AotPipeline(this.client, (text) => onCaption(text, ''));
 
     this.client.onStatusChange = (s) => {
       if (s === 'ready') this.isReady = true;
       this.onStatusChange?.(s);
     };
     this.client.onLoadProgress = (p) => this.onLoadProgress?.(p);
+    this.client.onDeviceChange = (d) => this.onDeviceChange?.(d);
 
     this.client.onAotBufferProgress = (seconds) => {
       if (this.isDestroyed) return;
@@ -55,163 +55,77 @@ export class TranscriptionEngine {
     };
   }
 
-  public initialize(modelKind: WhisperModelKind) {
+  public initialize(mode: AsrMode) {
     if (this.isDestroyed) return;
-    this.client.initialize(modelKind);
+    this.client.initialize(mode);
   }
 
-  public startAOT(url: string, videoElement: HTMLVideoElement) {
+  public startAOT(videoId: string, videoElement: HTMLVideoElement) {
     if (this.isDestroyed) return;
     this.aotMode = true;
     this.pendingVideoElement = videoElement;
-    this.client.startAOT(url);
+    this.client.startAOT(videoId);
   }
 
-  public async transcribe(audio: Float32Array): Promise<void> {
+  public probeHost(): Promise<{ ok: boolean; reason?: string }> {
+    return this.client.probeHost();
+  }
+
+  public transcribeLive(audio: Float32Array): void {
     if (this.isDestroyed || !this.isReady || this.aotMode) return;
-
-    if (this.isProcessing) {
-      this.pendingLiveAudio = audio;
-      return;
-    }
-
-    this.isProcessing = true;
-
-    try {
-      const result: TranscriptionResult = await this.client.transcribeJIT(audio);
-      if (this.isDestroyed) return;
-
-      const text = result?.text?.trim() || '';
-      if (text && !isHallucination(text)) {
-        this.clearSpeechEndTimer();
-
-        let mergedText = text;
-        if (this.isLiveSpeechActive && this.lastText) {
-          mergedText = mergeOverlap(this.lastText, text);
-        }
-        this.onCaption(mergedText, this.isLiveSpeechActive);
-        this.lastText = mergedText;
-
-        if (!this.isLiveSpeechActive) {
-          this.scheduleLiveCaptionClear();
-        }
-      } else {
-        if (!this.speechEndTimer) {
-          this.scheduleLiveCaptionClear();
-        }
-      }
-    } finally {
-      this.isProcessing = false;
-
-      const nextAudio = this.pendingLiveAudio;
-      this.pendingLiveAudio = null;
-      if (nextAudio && !this.isDestroyed && this.isReady && !this.aotMode) {
-        void this.transcribe(nextAudio);
-      }
-    }
+    void this.runLive(audio);
   }
 
-  public onSpeechStart() {
+  public resetLiveSession() {
     if (this.isDestroyed || this.aotMode) return;
-    this.isLiveSpeechActive = true;
-    this.clearSpeechEndTimer();
-    this.lastText = '';
-  }
-
-  public onSpeechEnd() {
-    if (this.isDestroyed || this.aotMode) return;
-    this.isLiveSpeechActive = false;
-    this.scheduleLiveCaptionClear();
+    this.clearLiveClearTimer();
+    this.liveSessionId++;
+    this.onCaption('', '');
   }
 
   public destroy() {
     if (this.isDestroyed) return;
     this.isDestroyed = true;
-    if (this.speechEndTimer) {
-      clearTimeout(this.speechEndTimer);
-      this.speechEndTimer = null;
-    }
+    this.clearLiveClearTimer();
     this.aotPipeline.destroy();
     this.client.destroy();
     this.isReady = false;
-    this.isProcessing = false;
-    this.pendingLiveAudio = null;
     this.aotMode = false;
     this.pendingVideoElement = null;
-    this.lastText = '';
-    this.isLiveSpeechActive = false;
   }
 
-  private scheduleLiveCaptionClear() {
-    this.clearSpeechEndTimer();
-    this.speechEndTimer = setTimeout(() => {
-      this.speechEndTimer = null;
-      this.onCaption('', false);
-      this.lastText = '';
+  private async runLive(audio: Float32Array) {
+    const sessionId = ++this.liveSessionId;
+    const result: TranscriptionResult = await this.client.transcribeLive(audio, sessionId);
+    if (this.isDestroyed || sessionId !== this.liveSessionId) return;
+
+    const text = result?.text?.trim() || '';
+    if (!text || isHallucination(text)) return;
+
+    const display = formatLiveCaption(text);
+    if (!display) return;
+
+    this.onCaption(display, '');
+    this.scheduleLiveClear();
+  }
+
+  private scheduleLiveClear() {
+    this.clearLiveClearTimer();
+    this.liveClearTimer = setTimeout(() => {
+      this.liveClearTimer = null;
+      this.onCaption('', '');
     }, LIVE_CAPTION_CLEAR_DELAY_MS);
   }
 
-  private clearSpeechEndTimer() {
-    if (!this.speechEndTimer) return;
-    clearTimeout(this.speechEndTimer);
-    this.speechEndTimer = null;
+  private clearLiveClearTimer() {
+    if (!this.liveClearTimer) return;
+    clearTimeout(this.liveClearTimer);
+    this.liveClearTimer = null;
   }
 }
 
-function mergeOverlap(accumulated: string, incoming: string): string {
-  if (!accumulated) return incoming;
-  if (!incoming) return accumulated;
-
-  const aWords = accumulated.trim().split(/\s+/);
-  const nWords = incoming.trim().split(/\s+/);
-
-  const clean = (w: string) => w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
-
-  let bestMatch = {
-    accumIndex: -1,
-    incomingIndex: -1,
-    matchLen: 0
-  };
-
-  const maxAnchors = Math.min(4, nWords.length);
-
-  for (let j = 0; j < maxAnchors; j++) {
-    const anchor = clean(nWords[j]);
-    if (!anchor) continue;
-
-    const searchStart = Math.max(0, aWords.length - 8);
-    for (let i = aWords.length - 1; i >= searchStart; i--) {
-      if (clean(aWords[i]) === anchor) {
-        let matchLen = 0;
-        let scanA = i;
-        let scanI = j;
-
-        while (scanA < aWords.length && scanI < nWords.length) {
-          if (clean(aWords[scanA]) === clean(nWords[scanI])) {
-            matchLen++;
-          } else {
-            break;
-          }
-          scanA++;
-          scanI++;
-        }
-
-        if (matchLen > bestMatch.matchLen) {
-          bestMatch = {
-            accumIndex: i,
-            incomingIndex: j,
-            matchLen: matchLen
-          };
-        }
-      }
-    }
-  }
-
-  if (bestMatch.matchLen > 0) {
-    const prefix = aWords.slice(0, bestMatch.accumIndex).join(" ");
-    const remainingIncoming = nWords.slice(bestMatch.incomingIndex).join(" ");
-    return prefix ? `${prefix} ${remainingIncoming}` : remainingIncoming;
-  }
-
-  return incoming;
+function formatLiveCaption(text: string): string {
+  const pieces = splitCaptionFromText(text, 0, 1);
+  if (pieces.length === 0) return '';
+  return pieces.map(p => p.text).join('\n');
 }

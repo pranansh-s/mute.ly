@@ -1,13 +1,14 @@
 {
   "name": "mutely-extension",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
     "build": "tsc && vite build && vite build --config vite.worker.config.ts",
     "clean": "rm -rf dist",
-    "server": "node server/index.cjs",
-    "test:aot": "npm run build && node test-aot-pipeline.mjs"
+    "install-host": "node host/install.cjs",
+    "uninstall-host": "node host/uninstall.cjs",
+    "test:scheduler": "tsc && node --test test/aot-scheduler.test.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
@@ -19,8 +20,6 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@ricky0123/vad-web": "^0.0.30",
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
     "onnxruntime-web": "^1.24.3"
   }
 }

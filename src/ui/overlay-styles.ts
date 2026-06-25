@@ -1,6 +1,6 @@
 export const OVERLAY_FONT: Partial<CSSStyleDeclaration> = {
   backgroundColor: 'rgba(20, 20, 25, 0.85)',
-  padding: '8px 16px',
+  padding: '6px 14px',
   borderRadius: '8px',
   fontFamily: '"YouTube Noto", Roboto, Arial, sans-serif',
   fontWeight: '500',
@@ -14,16 +14,21 @@ export const BASE_CONTAINER_STYLE: Partial<CSSStyleDeclaration> = {
   width: '80%',
   textAlign: 'center',
   pointerEvents: 'none',
-  transition: 'opacity 0.35s ease-in-out',
+  transition: 'opacity 0.12s ease-in-out',
   opacity: '0',
 };
 
 export const SUBTITLE_TEXT_STYLE: Partial<CSSStyleDeclaration> = {
   ...OVERLAY_FONT,
   color: '#fff',
-  fontSize: '24px',
+  fontSize: '20px',
   lineHeight: '1.4',
-  transition: 'box-shadow 0.3s ease, border 0.3s ease'
+  maxWidth: 'min(80%, 720px)',
+  display: 'inline-block',
+  textAlign: 'center',
+  whiteSpace: 'pre-line',
+  wordBreak: 'normal',
+  overflowWrap: 'break-word',
 };
 
 export const LOADING_INDICATOR_STYLE: Partial<CSSStyleDeclaration> = {

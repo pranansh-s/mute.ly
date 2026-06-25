@@ -6,28 +6,28 @@ export class SubtitleOverlay {
   private textElement: HTMLSpanElement | null = null;
   private loadingElement: HTMLDivElement | null = null;
   private mode: 'live' | 'vod' = 'vod';
+  private device: 'webgpu' | 'wasm' | null = null;
+  private loadProgress = 0;
+  private lastText = '';
 
   constructor() {}
+
+  public setDevice(device: 'webgpu' | 'wasm') {
+    this.device = device;
+    this.refreshLoadingText();
+  }
 
   public setMode(mode: 'live' | 'vod') {
     this.mode = mode;
     if (this.container) {
-      this.container.style.transition = mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.35s ease-in-out';
-    }
-    if (this.textElement) {
-      if (mode === 'live') {
-        this.textElement.style.boxShadow = '0 0 12px rgba(255, 0, 0, 0.6)';
-        this.textElement.style.border = '1px solid rgba(255, 0, 0, 0.3)';
-      } else {
-        this.textElement.style.boxShadow = 'none';
-        this.textElement.style.border = 'none';
-      }
+      this.container.style.transition = mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.12s ease-in-out';
     }
   }
 
   public checkAndInject = () => {
     if (this.container && document.body.contains(this.container)) return;
     if (this.container) this.destroy();
+    this.lastText = '';
 
     const playerContainer = YouTubeDOM.getPlayerContainer();
     if (!playerContainer) return;
@@ -39,16 +39,11 @@ export class SubtitleOverlay {
       ...BASE_CONTAINER_STYLE,
       bottom: '10%',
       zIndex: '9999',
-      transition: this.mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.35s ease-in-out',
+      transition: this.mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.12s ease-in-out',
     });
 
     this.textElement = document.createElement('span');
     Object.assign(this.textElement.style, SUBTITLE_TEXT_STYLE);
-
-    if (this.mode === 'live') {
-      this.textElement.style.boxShadow = '0 0 12px rgba(255, 0, 0, 0.6)';
-      this.textElement.style.border = '1px solid rgba(255, 0, 0, 0.3)';
-    }
 
     this.container.appendChild(this.textElement);
     playerContainer.appendChild(this.container);
@@ -62,18 +57,23 @@ export class SubtitleOverlay {
       this.loadingElement = document.createElement('div');
       this.loadingElement.id = 'mutely-loading-indicator';
       Object.assign(this.loadingElement.style, LOADING_INDICATOR_STYLE);
-      this.loadingElement.textContent = 'Mute.ly: Loading model...';
       this.container.appendChild(this.loadingElement);
     }
-
+    this.refreshLoadingText();
     this.container.style.opacity = '1';
     if (this.textElement) this.textElement.style.display = 'none';
   }
 
   public updateLoadingProgress(progress: number) {
-    if (this.loadingElement) {
-      this.loadingElement.textContent = `Mute.ly: Loading model... ${progress}%`;
-    }
+    this.loadProgress = progress;
+    this.refreshLoadingText();
+  }
+
+  private refreshLoadingText() {
+    if (!this.loadingElement) return;
+    const deviceLabel = this.device === 'webgpu' ? ' (WebGPU)' : this.device === 'wasm' ? ' (CPU)' : '';
+    const progress = this.loadProgress > 0 ? ` ${this.loadProgress}%` : '';
+    this.loadingElement.textContent = `Mute.ly: Loading model${deviceLabel}...${progress}`;
   }
 
   public hideLoading() {
@@ -85,42 +85,35 @@ export class SubtitleOverlay {
     if (this.container) this.container.style.opacity = '0';
   }
 
-  public renderText(text: string, isPartial: boolean = false) {
+  public renderText(committed: string, _tentative: string = '') {
     if (this.container && !document.body.contains(this.container)) {
       this.destroy();
     }
-
     if (!this.container || !this.textElement) {
       this.checkAndInject();
     }
-
     if (!this.container || !this.textElement) return;
 
-    const cleanText = text ? text.trim() : '';
+    const text = (committed || '').trim();
 
-    if (cleanText === '') {
-      if (this.container.style.opacity !== '0') {
-        this.container.style.opacity = '0';
-      }
+    if (text === '') {
+      if (this.container.style.opacity !== '0') this.container.style.opacity = '0';
+      this.lastText = '';
+      this.textElement.textContent = '';
       return;
     }
 
-    if (this.textElement.textContent === cleanText && this.container.style.opacity === '1') {
-      return;
+    if (text !== this.lastText) {
+      renderMultiLine(this.textElement, text);
+      this.lastText = text;
     }
-
-    this.textElement.textContent = cleanText;
-    this.container.style.opacity = '1';
-    this.textElement.style.color = isPartial ? '#cccccc' : '#ffffff';
+    if (this.container.style.opacity !== '1') this.container.style.opacity = '1';
   }
 
   public clear() {
-    if (this.container) {
-      this.container.style.opacity = '0';
-    }
-    if (this.textElement) {
-      this.textElement.textContent = '';
-    }
+    if (this.container) this.container.style.opacity = '0';
+    if (this.textElement) this.textElement.textContent = '';
+    this.lastText = '';
   }
 
   destroy() {
@@ -130,5 +123,14 @@ export class SubtitleOverlay {
     }
     this.container = null;
     this.textElement = null;
+  }
+}
+
+function renderMultiLine(element: HTMLElement, text: string) {
+  element.textContent = '';
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) element.appendChild(document.createElement('br'));
+    element.appendChild(document.createTextNode(lines[i]));
   }
 }

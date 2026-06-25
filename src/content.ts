@@ -1,4 +1,4 @@
-import { AudioExtractor } from './core/audio/audio-extractor';
+import { LiveStreamer } from './core/audio/live-streamer';
 import { TranscriptionEngine } from './core/transcription/transcription-engine';
 import { YouTubeDOM } from './core/youtube/youtube-dom';
 import type { MonitorStatus } from './core/types';
@@ -7,10 +7,8 @@ import { SubtitleOverlay } from './ui/subtitle-overlay';
 import { ErrorOverlay } from './ui/error-overlay';
 import { mapErrorToUI } from './core/errors/error-mapper';
 
-const LOCAL_SERVER_URL = 'http://localhost:3000';
-
 class YouTubeMonitor {
-  private readonly audioExtractor = new AudioExtractor();
+  private readonly liveStreamer = new LiveStreamer();
   private engine: TranscriptionEngine | null = null;
   private isRunning = false;
   private isStartingPipeline = false;
@@ -48,15 +46,6 @@ class YouTubeMonitor {
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  private async checkServerHealth(): Promise<boolean> {
-    try {
-      const res = await fetch(`${LOCAL_SERVER_URL}/api/health`);
-      return res.ok;
-    } catch {
-      console.error('[Mute.ly] Local server unreachable. Is it running? (npm run server)');
-      return false;
-    }
-  }
 
   public toggleMonitoring = () => {
     if (this.isRunning) {
@@ -99,9 +88,9 @@ class YouTubeMonitor {
     const runVideoId = this.currentVideoId;
 
     try {
-      const engine = new TranscriptionEngine((text, isPartial) => {
+      const engine = new TranscriptionEngine((committed, tentative) => {
         if (!this.isCurrentProcessingRun(generation, engine)) return;
-        this.subtitleOverlay.renderText(text, isPartial);
+        this.subtitleOverlay.renderText(committed, tentative);
       });
       this.engine = engine;
 
@@ -128,37 +117,47 @@ class YouTubeMonitor {
         this.playerButton.updateLoadingProgress(progress);
       };
 
+      engine.onDeviceChange = (device) => {
+        if (!this.isCurrentProcessingRun(generation, engine)) return;
+        this.subtitleOverlay.setDevice(device);
+      };
+
       const isLive = YouTubeDOM.isLiveStream();
       const videoElement = YouTubeDOM.getVideoElement();
       const videoId = runVideoId;
 
       if (!isLive && videoId && videoElement) {
-        engine.initialize('base');
-        const isServerUp = await this.checkServerHealth();
+        engine.initialize('vod');
+        const probe = await engine.probeHost();
         if (!this.isCurrentProcessingRun(generation, engine)) return;
         if (videoId !== this.currentVideoId) return;
 
-        if (isServerUp) {
+        if (probe.ok) {
           this.subtitleOverlay.setMode('vod');
-          const audioUrl = `${LOCAL_SERVER_URL}/api/audio-proxy?videoId=${videoId}`;
-          engine.startAOT(audioUrl, videoElement);
+          engine.startAOT(videoId, videoElement);
         } else {
           this.setStatus('error');
           this.isRunning = false;
           engine.destroy();
           if (this.engine === engine) this.engine = null;
-          this.errorOverlay.showError('Server Unreachable', 'Ensure "npm run server" is running in the mute.ly directory.');
+          const { title, advice } = mapErrorToUI(new Error(probe.reason || 'NO_NATIVE_HOST'));
+          this.errorOverlay.showError(title, advice);
         }
       } else if (videoElement) {
         this.subtitleOverlay.setMode('live');
-        engine.initialize('tiny');
-        await this.audioExtractor.startExtraction(engine, videoElement);
+        engine.initialize('live');
+        await this.liveStreamer.start(engine, videoElement);
       } else {
         throw new Error('NO_VIDEO');
       }
     } catch (error: unknown) {
       if (generation !== this.processingGeneration) return;
-      console.error('[Mute.ly] Failed to start processing:', error);
+      const detail = error instanceof DOMException
+        ? `DOMException ${error.name}: ${error.message}`
+        : error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+      console.error('[Mute.ly] Failed to start processing:', detail, error);
       this.setStatus('error');
       this.isRunning = false;
       if (this.engine) {
@@ -183,7 +182,7 @@ class YouTubeMonitor {
     this.processingGeneration++;
     this.isStartingPipeline = false;
     this.clearNavigationCheck();
-    await this.audioExtractor.stopExtraction();
+    await this.liveStreamer.stop();
     if (this.engine) {
       this.engine.destroy();
       this.engine = null;
