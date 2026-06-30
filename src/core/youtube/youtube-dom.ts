@@ -1,6 +1,3 @@
-/**
- * Static utility methods for interacting with the YouTube DOM.
- */
 export class YouTubeDOM {
   public static getVideoURL(): string | null {
     const match = window.location.href.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})(?:\?|&|\/|$)/);

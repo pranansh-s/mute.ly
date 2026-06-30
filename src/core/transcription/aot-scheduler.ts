@@ -1,5 +1,5 @@
 export const CHUNK_DURATION_SECONDS = 30;
-export const CHUNK_STRIDE_SECONDS = 22;
+export const CHUNK_STRIDE_SECONDS = 25;
 export const LOOKAHEAD_CHUNKS = 4;
 
 export interface ChunkRequest {

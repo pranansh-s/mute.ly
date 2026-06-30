@@ -17,12 +17,7 @@ const MODEL_BY_MODE: Record<AsrMode, string> = {
 };
 
 const MAX_NEW_TOKENS_LIVE = 224;
-const MAX_NEW_TOKENS_AOT = 444;
-const VOD_NUM_BEAMS = 4;
-const VOD_TEMPERATURE_FALLBACK = [0.0, 0.2, 0.4];
-const VOD_NO_SPEECH_THRESHOLD = 0.6;
-const VOD_LOGPROB_THRESHOLD = -1.0;
-const VOD_COMPRESSION_RATIO_THRESHOLD = 2.4;
+const MAX_NEW_TOKENS_VOD = 256;
 
 const transcribers = new Map<AsrMode, Transcriber>();
 const loadPromises = new Map<AsrMode, Promise<void>>();
@@ -51,11 +46,10 @@ async function detectDevice(): Promise<AsrDevice> {
   return detectedDevice;
 }
 
-function dtypeFor(_mode: AsrMode, device: AsrDevice): string {
-  // whisper-tiny/base.en quantized variants: q8 works on both WebGPU and WASM
-  // for these checkpoints. fp16 encoder + q4 decoder is an optimization to
-  // revisit once we swap to models that ship those variants.
-  return device === 'webgpu' ? 'q8' : 'q8';
+type DtypeSpec = string | Record<string, string>;
+
+function dtypeFor(_mode: AsrMode, _device: AsrDevice): DtypeSpec {
+  return 'q8';
 }
 
 function reportProgress(mode: AsrMode) {
@@ -99,7 +93,6 @@ async function loadModel(mode: AsrMode): Promise<boolean> {
       } catch (err) {
         transcribers.delete(mode);
         console.error('[mutely:asr] Model load failed:', err);
-        // WebGPU init can fail late; force WASM fallback once.
         if (detectedDevice === 'webgpu') {
           detectedDevice = 'wasm';
           self.postMessage({ type: 'device', device: detectedDevice });
@@ -152,7 +145,6 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
     return;
   }
 
-  // transcribe_live | transcribe_aot
   const { type, audio, id, tabId, clientId, sessionId, mode } = msg;
   currentProcessingId = id;
   abortCurrentChunk = false;
@@ -168,22 +160,28 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
   try {
     const isLive = type === 'transcribe_live';
     const options: Record<string, unknown> = {
-      max_new_tokens: isLive ? MAX_NEW_TOKENS_LIVE : MAX_NEW_TOKENS_AOT,
-      num_beams: isLive ? 1 : VOD_NUM_BEAMS,
+      max_new_tokens: isLive ? MAX_NEW_TOKENS_LIVE : MAX_NEW_TOKENS_VOD,
+      num_beams: 1,
       callback_function: () => {
         if (abortCurrentChunk) throw new Error('ABORTED');
       },
     };
-    if (!isLive) {
-      options.return_timestamps = true;
-      options.no_speech_threshold = VOD_NO_SPEECH_THRESHOLD;
-      options.logprob_threshold = VOD_LOGPROB_THRESHOLD;
-      options.compression_ratio_threshold = VOD_COMPRESSION_RATIO_THRESHOLD;
-      options.condition_on_previous_text = false;
-      options.temperature = VOD_TEMPERATURE_FALLBACK;
+    if (!isLive) options.return_timestamps = true;
+    const audioArr = new Float32Array(audio);
+    const audioRms = (() => {
+      let s = 0;
+      for (let i = 0; i < audioArr.length; i++) s += audioArr[i] * audioArr[i];
+      return Math.sqrt(s / Math.max(1, audioArr.length));
+    })();
+    const t0 = performance.now();
+    const result = await transcriber(audioArr, options);
+    const dt = (performance.now() - t0).toFixed(0);
+    console.log(`[mutely:asr] ${mode} id=${id} samples=${audioArr.length} rms=${audioRms.toFixed(4)} took=${dt}ms text=${JSON.stringify(result?.text ?? '').slice(0, 300)} chunks=${result?.chunks?.length ?? 0}`);
+    if (result?.chunks && Array.isArray(result.chunks)) {
+      for (const ch of result.chunks.slice(0, 20)) {
+        console.log(`[mutely:asr]   chunk ts=${JSON.stringify(ch.timestamp)} text=${JSON.stringify(ch.text)}`);
+      }
     }
-
-    const result = await transcriber(new Float32Array(audio), options);
     self.postMessage({ type: 'result', id, sessionId, tabId, clientId, result });
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'ABORTED') {

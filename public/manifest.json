@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Mute.ly",
   "version": "3.0.0",
+  "minimum_chrome_version": "116",
   "description": "Free, private YouTube captions powered by local AI — no server, no API keys, no data ever leaves your browser",
   "permissions": [
     "offscreen",

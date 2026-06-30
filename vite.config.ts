@@ -34,10 +34,6 @@ export default defineConfig({
           dest: '.',
         },
         {
-          src: 'public/capture-worklet.js',
-          dest: 'assets',
-        },
-        {
           src: 'node_modules/onnxruntime-web/dist/*.wasm',
           dest: 'assets',
         },

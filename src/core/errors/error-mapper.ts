@@ -9,7 +9,7 @@ export function mapErrorToUI(error: unknown): UIErrorData {
   if (errMsg.includes('NO_NATIVE_HOST')) {
     return {
       title: 'Mute.ly Helper Not Installed',
-      advice: 'Run `npm run install-host -- --extension-id=<ID>` once from the project folder, then reload this page. Get the ID from chrome://extensions.'
+      advice: `Run \`npm run install-host -- --extension-id=<ID>\` once from the project folder, then reload this page. Get the ID from chrome://extensions.\n\nDetails: ${errMsg}`
     };
   }
 

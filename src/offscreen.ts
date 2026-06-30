@@ -1,16 +1,9 @@
-/**
- * Mute.ly Offscreen ASR host
- *
- * Owns the AOT PCM stream and the ASR worker. Scheduling lives in the
- * content-side AOT pipeline / live streamer; this file gates one worker job
- * at a time and routes results back to the originating tab/client.
- */
-
 import type {
   AsrDevice,
   AsrMode,
   OffscreenCommand,
   OffscreenEvent,
+  SpeechActivityWindow,
 } from './core/types';
 import { AotStreamDecoder, type TranscribeAOTRequest } from './core/audio/aot-stream-decoder';
 import { preprocessAudio } from './core/audio/audio-preprocessor';
@@ -33,6 +26,7 @@ interface WorkerJob {
   clientId?: string;
   tabId?: number;
   mode: AsrMode;
+  speechActivity?: SpeechActivityWindow[];
 }
 
 type ModelState = 'idle' | 'loading' | 'ready';
@@ -45,7 +39,6 @@ interface ModelStatusState {
 const MODEL_LOAD_STALL_MS = 300_000;
 const LIVE_WORKER_TIMEOUT_MS = 20_000;
 const AOT_WORKER_TIMEOUT_MS = 330_000;
-const NATIVE_HOST_NAME = 'com.mutely.host';
 
 let worker = createWorker();
 let currentDevice: AsrDevice | null = null;
@@ -53,7 +46,6 @@ let activeWorkerJob: WorkerJob | null = null;
 let activeWorkerJobWatchdog: ReturnType<typeof setTimeout> | null = null;
 let workerQueue: WorkerJob[] = [];
 let activeAotOwner: AotOwner | null = null;
-let nativePort: chrome.runtime.Port | null = null;
 const modelStates = new Map<AsrMode, ModelStatusState>();
 
 keepOffscreenAlive();
@@ -69,6 +61,7 @@ const decoder = new AotStreamDecoder(
     tabId: request.tabId ?? activeAotOwner?.tabId,
     clientId: request.clientId ?? activeAotOwner?.clientId,
     mode: request.mode,
+    speechActivity: request.speechActivity,
   }),
   (request) => {
     send({
@@ -100,13 +93,27 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
     case 'load_aot':
       stopAotForClient();
       activeAotOwner = { tabId: msg.tabId, clientId: msg.clientId };
-      startNativeStream(msg.videoId);
+      decoder.beginStream();
       break;
     case 'stop_aot':
       stopAotForClient(msg.clientId);
       break;
-    case 'host_probe':
-      probeNativeHost(msg.tabId, msg.clientId);
+    case 'aot_pcm':
+      if (activeAotOwner && msg.clientId === activeAotOwner.clientId) {
+        const bytes = decodeBase64(msg.chunk);
+        console.log(`[mutely:offscreen] aot_pcm rx bytes=${bytes.length} (~${(bytes.length / 4 / 16000).toFixed(2)}s)`);
+        decoder.feed(bytes);
+      }
+      break;
+    case 'aot_pcm_end':
+      if (activeAotOwner && (!msg.clientId || msg.clientId === activeAotOwner.clientId)) {
+        decoder.finalizeStream(msg.durationSeconds);
+      }
+      break;
+    case 'aot_pcm_error':
+      if (activeAotOwner && (!msg.clientId || msg.clientId === activeAotOwner.clientId)) {
+        decoder.failStream(msg.reason);
+      }
       break;
     case 'abort_job':
       abortJob(msg.id, msg.clientId);
@@ -173,6 +180,9 @@ function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
     tabId: msg.tabId ?? finishedJob?.tabId,
     clientId: msg.clientId ?? finishedJob?.clientId,
     sessionId: msg.sessionId ?? finishedJob?.sessionId,
+    result: finishedJob?.speechActivity && !msg.result.dropped
+      ? { ...msg.result, speechActivity: finishedJob.speechActivity }
+      : msg.result,
   });
 
   pumpWorkerQueue();
@@ -257,8 +267,6 @@ function restartWorker(reason: string, preserveQueuedJobs = false) {
   clearActiveWorkerJobWatchdog();
 
   if (preserveQueuedJobs) {
-    // Soft restart — keep queue + model state cache. Worker re-instantiates the
-    // pipeline from browser HTTP cache on next request.
     if (activeWorkerJob) {
       sendDropped(activeWorkerJob);
       activeWorkerJob = null;
@@ -337,113 +345,11 @@ function clearActiveWorkerJobWatchdog() {
 function stopAotForClient(clientId?: string) {
   if (!clientId || activeAotOwner?.clientId === clientId) {
     decoder.cancelStream();
-    disconnectNativePort();
     activeAotOwner = null;
   }
 
   dropQueuedAotJobs(clientId);
   abortActiveAotJob(clientId);
-}
-
-function startNativeStream(videoId: string) {
-  disconnectNativePort();
-  decoder.beginStream();
-
-  let port: chrome.runtime.Port;
-  try {
-    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    decoder.failStream(`NO_NATIVE_HOST: ${message}`);
-    return;
-  }
-
-  nativePort = port;
-
-  port.onMessage.addListener((msg: { type?: string; chunk?: string; durationSeconds?: number; message?: string; code?: string }) => {
-    if (port !== nativePort) return;
-    if (!msg || typeof msg.type !== 'string') return;
-
-    if (msg.type === 'pcm' && typeof msg.chunk === 'string') {
-      decoder.feed(decodeBase64(msg.chunk));
-      return;
-    }
-    if (msg.type === 'end') {
-      decoder.finalizeStream(msg.durationSeconds);
-      disconnectNativePort();
-      return;
-    }
-    if (msg.type === 'error') {
-      const code = msg.code ?? 'NATIVE_HOST_ERROR';
-      decoder.failStream(`${code}: ${msg.message ?? 'native host error'}`);
-      disconnectNativePort();
-      return;
-    }
-  });
-
-  port.onDisconnect.addListener(() => {
-    if (port !== nativePort) return;
-    nativePort = null;
-    const lastError = chrome.runtime.lastError;
-    if (lastError) {
-      decoder.failStream(`NO_NATIVE_HOST: ${lastError.message ?? 'native host disconnected'}`);
-    } else {
-      decoder.finalizeStream();
-    }
-  });
-
-  try {
-    port.postMessage({ type: 'start', videoId });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    decoder.failStream(`NO_NATIVE_HOST: ${message}`);
-    disconnectNativePort();
-  }
-}
-
-function disconnectNativePort() {
-  if (!nativePort) return;
-  const port = nativePort;
-  nativePort = null;
-  try { port.postMessage({ type: 'stop' }); } catch {}
-  try { port.disconnect(); } catch {}
-}
-
-function probeNativeHost(tabId?: number, clientId?: string) {
-  let port: chrome.runtime.Port;
-  try {
-    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    send({ type: 'host_status', ok: false, reason: `NO_NATIVE_HOST: ${message}`, tabId, clientId });
-    return;
-  }
-
-  let resolved = false;
-  const resolve = (ok: boolean, reason?: string) => {
-    if (resolved) return;
-    resolved = true;
-    try { port.disconnect(); } catch {}
-    send({ type: 'host_status', ok, reason, tabId, clientId });
-  };
-
-  port.onMessage.addListener((msg: { type?: string }) => {
-    if (msg?.type === 'pong') resolve(true);
-  });
-
-  port.onDisconnect.addListener(() => {
-    const lastError = chrome.runtime.lastError;
-    resolve(false, `NO_NATIVE_HOST: ${lastError?.message ?? 'disconnected'}`);
-  });
-
-  try {
-    port.postMessage({ type: 'ping' });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    resolve(false, `NO_NATIVE_HOST: ${message}`);
-  }
-
-  setTimeout(() => resolve(false, 'NO_NATIVE_HOST: probe timeout'), 4000);
 }
 
 function decodeBase64(b64: string): Uint8Array {
@@ -464,9 +370,6 @@ function abortActiveAotJob(clientId?: string) {
 
 function abortJob(id: number, clientId: string) {
   if (activeWorkerJob?.id === id && activeWorkerJob.clientId === clientId) {
-    // Cooperative abort: worker's callback_function throws ABORTED on the next
-    // token, returns dropped:true via the normal result path, handleWorkerMessage
-    // clears state + pumps queue. No worker restart needed.
     worker.postMessage({ type: 'abort_chunk', id });
     return;
   }
@@ -532,9 +435,6 @@ function ownerEvent<T extends OffscreenEvent>(msg: T): T {
   } as T;
 }
 
-// ponytail: 1Hz silent oscillator keeps MV3 offscreen alive across long idle.
-// Chrome 116+ retains offscreen while an AudioContext lives; this is that
-// hook. Cheaper than re-creating offscreen + worker on every wake.
 function keepOffscreenAlive() {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;

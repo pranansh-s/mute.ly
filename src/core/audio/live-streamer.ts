@@ -9,7 +9,7 @@ const ASSET_BASE = chrome.runtime.getURL('assets/');
 
 export class LiveStreamer {
   private isExtracting = false;
-  private capturedStream: MediaStream | null = null;
+  private audioTrack: MediaStreamTrack | null = null;
   private videoElement: HTMLVideoElement | null = null;
   private seekHandler: (() => void) | null = null;
   private vad: MicVAD | null = null;
@@ -67,6 +67,7 @@ export class LiveStreamer {
         if (!this.isExtracting) return;
         this.clearFlushTimer();
         engine.resetLiveSession();
+        void this.flushVadOnSeek();
       };
       videoElement.addEventListener('seeking', this.seekHandler);
     } catch (error) {
@@ -86,13 +87,12 @@ export class LiveStreamer {
     this.seekHandler = null;
 
     if (this.vad) {
-      // ponytail: destroy is best-effort; already torn down is fine, no log
       try { await this.vad.destroy(); } catch {}
       this.vad = null;
     }
-    if (this.capturedStream) {
-      this.capturedStream.getTracks().forEach(t => t.stop());
-      this.capturedStream = null;
+    if (this.audioTrack) {
+      this.audioTrack.stop();
+      this.audioTrack = null;
     }
   }
 
@@ -119,6 +119,16 @@ export class LiveStreamer {
     this.flushTimer = null;
   }
 
+  private async flushVadOnSeek() {
+    if (!this.vad) return;
+    const vad = this.vad;
+    try {
+      await vad.pause();
+      if (!this.isExtracting || this.vad !== vad) return;
+      await vad.start();
+    } catch {}
+  }
+
   private async waitForAudioTrack(videoElement: HTMLVideoElement): Promise<MediaStreamTrack | null> {
     const deadline = Date.now() + AUDIO_TRACK_TIMEOUT_MS;
     while (this.isExtracting) {
@@ -129,7 +139,7 @@ export class LiveStreamer {
           const stream: MediaStream = captureFn.call(videoElement);
           const tracks = stream.getAudioTracks();
           if (tracks.length > 0) {
-            this.capturedStream = stream;
+            this.audioTrack = tracks[0];
             return tracks[0];
           }
         } catch (err) {

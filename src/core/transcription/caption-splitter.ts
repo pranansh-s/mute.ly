@@ -15,9 +15,9 @@ const SENTENCE_END = /[.!?]["')\]]?$/;
 const MAX_LINE_CHARS = 42;
 const MAX_LINES = 2;
 const MAX_CAPTION_CHARS = MAX_LINE_CHARS * MAX_LINES;
-const MIN_CAPTION_SECONDS = 0.75;
-const READING_SECONDS_PER_CHAR = 0.06;
-const MAX_READING_SECONDS_PER_CHAR = 1 / 21;
+const MIN_CAPTION_SECONDS = 1.0;
+const READING_SECONDS_PER_CHAR = 0.05;
+const MAX_READING_SECONDS_PER_CHAR = 1 / 17;
 
 export function splitCaptionFromWords(words: WordTimestamp[]): SplitCaption[] {
   const usable = sanitizeWords(words);

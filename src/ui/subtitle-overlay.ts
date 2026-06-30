@@ -97,8 +97,9 @@ export class SubtitleOverlay {
     const text = (committed || '').trim();
 
     if (text === '') {
-      if (this.container.style.opacity !== '0') this.container.style.opacity = '0';
+      if (this.lastText === '') return;
       this.lastText = '';
+      this.textElement.style.visibility = 'hidden';
       this.textElement.textContent = '';
       return;
     }
@@ -107,6 +108,7 @@ export class SubtitleOverlay {
       renderMultiLine(this.textElement, text);
       this.lastText = text;
     }
+    if (this.textElement.style.visibility !== 'visible') this.textElement.style.visibility = 'visible';
     if (this.container.style.opacity !== '1') this.container.style.opacity = '1';
   }
 

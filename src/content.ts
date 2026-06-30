@@ -198,9 +198,6 @@ class YouTubeMonitor {
   }
 
   private handlePageHide = () => {
-    this.setStatus('idle');
-    this.subtitleOverlay.clear();
-    this.errorOverlay.clear();
     void this.stopMonitoring();
   };
 

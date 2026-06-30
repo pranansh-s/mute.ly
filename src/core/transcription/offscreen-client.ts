@@ -1,6 +1,6 @@
 import type { AsrDevice, AsrMode, ModelStatus, OffscreenEvent, TranscriptionResult } from '../types';
 
-const AOT_CHUNK_TIMEOUT_MS = 300_000;
+const AOT_CHUNK_TIMEOUT_MS = 340_000;
 const LIVE_TIMEOUT_MS = 25_000;
 
 interface PendingLiveResult {
@@ -17,7 +17,7 @@ interface ActiveAotResult {
 
 export class OffscreenClient {
   private messageId = 0;
-  private readonly clientId = createClientId();
+  private readonly clientId = crypto.randomUUID();
   private isDestroyed = false;
   private aotStarted = false;
   private requestedMode: AsrMode = 'vod';
@@ -247,11 +247,4 @@ export class OffscreenClient {
       throw new Error(response.error || 'Offscreen message failed');
     }
   }
-}
-
-function createClientId() {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-  return `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

@@ -5,14 +5,15 @@ export type ModelStatus = 'loading' | 'ready' | 'error';
 export type AsrMode = 'live' | 'vod';
 export type AsrDevice = 'webgpu' | 'wasm';
 
-// ── Messages: Content → Background → Offscreen ─────────────────────
-
 export type OffscreenCommand =
   | { type: 'load'; clientId?: string; mode: AsrMode }
   | { type: 'load_aot'; videoId: string; clientId: string }
   | { type: 'stop_aot'; clientId: string }
   | { type: 'abort_job'; id: number; clientId: string }
   | { type: 'host_probe'; clientId: string }
+  | { type: 'aot_pcm'; chunk: string; clientId?: string }
+  | { type: 'aot_pcm_end'; durationSeconds?: number; clientId?: string }
+  | { type: 'aot_pcm_error'; reason: string; clientId?: string }
   | {
       type: 'transcribe_live';
       audio: number[];
@@ -28,9 +29,8 @@ export type OffscreenCommand =
       id: number;
       clientId: string;
       mode: AsrMode;
+      speechActivity?: SpeechActivityWindow[];
     };
-
-// ── Messages: Offscreen → Background → Content ─────────────────────
 
 export type OffscreenEvent =
   | { type: 'loading'; progress: number; mode?: AsrMode }
@@ -49,11 +49,6 @@ export type OffscreenEvent =
       result: TranscriptionResult;
     };
 
-// ── Messages: Offscreen → ASR Worker ───────────────────────────────
-// Worker envelope is a superset of OffscreenCommand: offscreen adds tabId
-// for routing replies, and converts `abort_job` into the worker's local
-// `abort_chunk`. Keep this union in sync with `src/asr-worker.ts`.
-
 export type WorkerCommand =
   | { type: 'load'; mode: AsrMode }
   | { type: 'abort_chunk'; id: number }
@@ -65,13 +60,13 @@ export type WorkerCommand =
       tabId?: number;
       clientId?: string;
       mode: AsrMode;
+      speechActivity?: SpeechActivityWindow[];
     };
-
-// ── Transcription result from the ASR worker ────────────────────
 
 export interface TranscriptionResult {
   text?: string;
   chunks?: TranscriptionChunk[];
+  speechActivity?: SpeechActivityWindow[];
   dropped?: boolean;
   dropReason?: string;
 }
@@ -79,4 +74,9 @@ export interface TranscriptionResult {
 export interface TranscriptionChunk {
   text: string;
   timestamp: [number, number] | [number, null];
+}
+
+export interface SpeechActivityWindow {
+  start: number;
+  end: number;
 }
