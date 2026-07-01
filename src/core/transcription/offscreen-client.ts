@@ -100,6 +100,18 @@ export class OffscreenClient {
     this.settleActiveAot({ dropped: true, dropReason: 'aborted' });
   }
 
+  public abortPendingLive() {
+    if (this.isDestroyed) return;
+    if (this.pendingLiveResults.size === 0) return;
+    for (const [id] of this.pendingLiveResults) {
+      this.sendToOffscreen({ type: 'abort_job', id, clientId: this.clientId }).catch(() => {});
+    }
+    for (const pending of this.pendingLiveResults.values()) {
+      pending.resolve({ text: '' });
+    }
+    this.pendingLiveResults.clear();
+  }
+
   public transcribeLive(audio: Float32Array, sessionId: number): Promise<TranscriptionResult> {
     if (this.isDestroyed) return Promise.resolve({ text: '' });
 

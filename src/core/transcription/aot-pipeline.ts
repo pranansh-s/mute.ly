@@ -15,8 +15,9 @@ const SCHEDULER_POLL_MS = 500;
 const CACHE_LIMIT_CHUNKS = 500;
 const CAPTION_END_GRACE_SECONDS = 0.2;
 const BRIDGE_GAP_SECONDS = 0.5;
-const HOLD_AFTER_END_SECONDS = 0.5;
+const HOLD_AFTER_END_SECONDS = 1;
 const MIN_CAPTION_DURATION_SECONDS = 0.5;
+const SEEK_DEBOUNCE_MS = 150;
 
 interface CaptionTimestamp {
   start: number;
@@ -129,6 +130,7 @@ export class AotPipeline {
 
   private audioDuration = Infinity;
   private bufferedDuration = 0;
+  private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly client: OffscreenClient,
@@ -160,6 +162,7 @@ export class AotPipeline {
     this.restartSchedulerTimer();
 
     videoElement.addEventListener('seeking', this.handleSeek);
+    videoElement.addEventListener('seeked', this.handleSeeked);
     videoElement.addEventListener('timeupdate', this.handleTimeUpdate);
     videoElement.addEventListener('ended', this.handleEnded);
     videoElement.addEventListener('ratechange', this.handleRateChange);
@@ -186,6 +189,8 @@ export class AotPipeline {
     this.renderTimer = null;
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     this.schedulerTimer = null;
+    if (this.seekDebounceTimer) clearTimeout(this.seekDebounceTimer);
+    this.seekDebounceTimer = null;
     this.detachVideoListeners();
 
     this.pendingQueue = [];
@@ -196,11 +201,41 @@ export class AotPipeline {
     this.lastCaptionEnd = 0;
   }
 
+  private lastSeekTime = 0;
+
   private handleSeek = () => {
     if (!this.videoElement || !this.isStarted) return;
 
+    this.lastText = '';
+    this.lastCaptionEnd = 0;
+    this.onCaption('', false);
+
+    if (this.seekDebounceTimer) clearTimeout(this.seekDebounceTimer);
+    this.seekDebounceTimer = setTimeout(() => {
+      this.seekDebounceTimer = null;
+      this.applySeek();
+    }, SEEK_DEBOUNCE_MS);
+  };
+
+  private handleSeeked = () => {
+    if (!this.videoElement || !this.isStarted) return;
+    if (this.seekDebounceTimer) {
+      clearTimeout(this.seekDebounceTimer);
+      this.seekDebounceTimer = null;
+      this.applySeek();
+    }
+  };
+
+  private applySeek() {
+    if (!this.videoElement || !this.isStarted) return;
+
     const newTime = this.videoElement.currentTime;
-    if (!this.activeChunkCoversTime(newTime)) {
+    const activeCoversPlayhead = this.activeChunkCoversTime(newTime);
+    const seekDelta = Math.abs(newTime - this.lastSeekTime);
+    const seekIsLarge = seekDelta > CHUNK_STRIDE_SECONDS / 2;
+    this.lastSeekTime = newTime;
+
+    if (!activeCoversPlayhead || seekIsLarge) {
       this.seekEpoch++;
       if (this.isProcessing) {
         this.client.abortActiveAOT();
@@ -212,7 +247,7 @@ export class AotPipeline {
     this.lastChunkIndex = -1;
     this.rebuildQueue();
     this.renderCaptions();
-  };
+  }
 
   private handleTimeUpdate = () => {
     if (!this.videoElement) return;
@@ -333,6 +368,7 @@ export class AotPipeline {
   private detachVideoListeners() {
     if (!this.videoElement) return;
     this.videoElement.removeEventListener('seeking', this.handleSeek);
+    this.videoElement.removeEventListener('seeked', this.handleSeeked);
     this.videoElement.removeEventListener('timeupdate', this.handleTimeUpdate);
     this.videoElement.removeEventListener('ended', this.handleEnded);
     this.videoElement.removeEventListener('ratechange', this.handleRateChange);

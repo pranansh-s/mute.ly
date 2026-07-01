@@ -159,7 +159,7 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
         if (abortCurrentChunk) throw new Error('ABORTED');
       },
     };
-    if (!isLive) options.return_timestamps = true;
+    if(!isLive) options.return_timestamps = true;
     const result = await transcriber(new Float32Array(audio), options);
     self.postMessage({ type: 'result', id, sessionId, tabId, clientId, result });
   } catch (err: unknown) {

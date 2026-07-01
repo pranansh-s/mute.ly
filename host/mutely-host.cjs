@@ -87,6 +87,7 @@ function startStream(videoId) {
     ytDlp = spawn('yt-dlp', [
       '--no-warnings',
       '--no-playlist',
+      '--extractor-args', 'youtube:player_client=default,web_safari,mweb,ios,tv',
       '-f', 'bestaudio',
       '-o', '-',
       `https://www.youtube.com/watch?v=${videoId}`,

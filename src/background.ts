@@ -1,5 +1,6 @@
 const NATIVE_HOST_NAME = 'com.mutely.host';
 const PROBE_TIMEOUT_MS = 4000;
+const NATIVE_KEEPALIVE_MS = 20000;
 
 let creationPromise: Promise<void> | null = null;
 const activeTabs = new Set<number>();
@@ -13,6 +14,8 @@ interface AotOwner {
 
 let nativePort: chrome.runtime.Port | null = null;
 let activeAotOwner: AotOwner | null = null;
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+let forwardChain: Promise<void> = Promise.resolve();
 
 async function ensureOffscreen() {
   if (creationPromise) return creationPromise;
@@ -40,14 +43,33 @@ async function ensureOffscreen() {
   }
 }
 
-async function forwardToOffscreen(data: Record<string, unknown>, tabId?: number) {
+function forwardToOffscreen(data: Record<string, unknown>, tabId?: number): Promise<void> {
   const payload = { ...data, _fromBackground: true, tabId };
-  await ensureOffscreen();
-  try {
-    await chrome.runtime.sendMessage(payload);
-  } catch {
+  const next = forwardChain.then(async () => {
     await ensureOffscreen();
-    try { await chrome.runtime.sendMessage(payload); } catch {}
+    try {
+      await chrome.runtime.sendMessage(payload);
+    } catch {
+      await ensureOffscreen();
+      try { await chrome.runtime.sendMessage(payload); } catch {}
+    }
+  });
+  forwardChain = next.catch(() => {});
+  return next;
+}
+
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(() => {
+    if (!nativePort) { stopKeepalive(); return; }
+    try { nativePort.postMessage({ type: 'ping' }); } catch {}
+  }, NATIVE_KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer !== null) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
   }
 }
 
@@ -59,6 +81,7 @@ function sendToTab(tabId: number | undefined, msg: Record<string, unknown>) {
 }
 
 function disconnectNativePort() {
+  stopKeepalive();
   if (!nativePort) return;
   const port = nativePort;
   nativePort = null;
@@ -110,6 +133,7 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
     if (port !== nativePort) return;
     const lastError = chrome.runtime.lastError;
     const owner = activeAotOwner;
+    stopKeepalive();
     nativePort = null;
     if (lastError) {
       void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST: ${lastError.message ?? 'disconnected'}`, clientId: owner?.clientId }, owner?.tabId);
@@ -121,6 +145,7 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
 
   try {
     port.postMessage({ type: 'start', videoId });
+    startKeepalive();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST: ${message}`, clientId });

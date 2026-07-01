@@ -90,15 +90,38 @@ function checkDep(cmd, args) {
 
 function ensureLauncher() {
   const nodeBin = process.execPath;
+  const pathExt = extraPathDirs().join(path.delimiter);
 
   if (process.platform === 'win32') {
-    fs.writeFileSync(INSTALLED_LAUNCHER, `@echo off\r\n"${nodeBin}" "${INSTALLED_HOST_SCRIPT}" %*\r\n`);
+    const setPath = pathExt ? `set PATH=${pathExt};%PATH%\r\n` : '';
+    fs.writeFileSync(INSTALLED_LAUNCHER, `@echo off\r\n${setPath}"${nodeBin}" "${INSTALLED_HOST_SCRIPT}" %*\r\n`);
     return INSTALLED_LAUNCHER;
   }
 
-  fs.writeFileSync(INSTALLED_LAUNCHER, `#!/bin/sh\nexec "${nodeBin}" "${INSTALLED_HOST_SCRIPT}" "$@"\n`);
+  const exportPath = pathExt ? `export PATH="${pathExt}:$PATH"\n` : '';
+  fs.writeFileSync(INSTALLED_LAUNCHER, `#!/bin/sh\n${exportPath}exec "${nodeBin}" "${INSTALLED_HOST_SCRIPT}" "$@"\n`);
   fs.chmodSync(INSTALLED_LAUNCHER, 0o755);
+  if (process.platform === 'darwin') {
+    stripQuarantine(INSTALLED_LAUNCHER);
+    stripQuarantine(INSTALLED_HOST_SCRIPT);
+  }
   return INSTALLED_LAUNCHER;
+}
+
+function stripQuarantine(filePath) {
+  const result = spawnSync('xattr', ['-d', 'com.apple.quarantine', filePath], { stdio: 'ignore' });
+  if (result.status === 0) console.log(`[mutely] Stripped com.apple.quarantine from ${filePath}`);
+}
+
+function extraPathDirs() {
+  const dirs = new Set();
+  for (const cmd of ['yt-dlp', 'ffmpeg']) {
+    const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', [cmd], { encoding: 'utf8' });
+    const found = (which.stdout || '').trim().split(/\r?\n/).filter(Boolean)[0];
+    if (found) dirs.add(path.dirname(found));
+  }
+  dirs.add(path.dirname(process.execPath));
+  return Array.from(dirs);
 }
 
 function manifestTargets() {

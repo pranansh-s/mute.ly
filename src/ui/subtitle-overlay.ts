@@ -19,9 +19,12 @@ export class SubtitleOverlay {
 
   public setMode(mode: 'live' | 'vod') {
     this.mode = mode;
-    if (this.container) {
-      this.container.style.transition = mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.12s ease-in-out';
-    }
+    if (this.container) this.container.style.transition = this.transitionForMode();
+  }
+
+  private transitionForMode(): string {
+    if (prefersReducedMotion()) return 'none';
+    return this.mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.12s ease-in-out';
   }
 
   public checkAndInject = () => {
@@ -34,12 +37,16 @@ export class SubtitleOverlay {
 
     this.container = document.createElement('div');
     this.container.id = 'mutely-subtitle-overlay';
+    this.container.setAttribute('role', 'status');
+    this.container.setAttribute('aria-live', 'polite');
+    this.container.setAttribute('aria-atomic', 'true');
+    this.container.setAttribute('aria-hidden', 'true');
 
     Object.assign(this.container.style, {
       ...BASE_CONTAINER_STYLE,
       bottom: '10%',
       zIndex: '9999',
-      transition: this.mode === 'live' ? 'opacity 0.2s ease-in-out' : 'opacity 0.12s ease-in-out',
+      transition: this.transitionForMode(),
     });
 
     this.textElement = document.createElement('span');
@@ -100,6 +107,7 @@ export class SubtitleOverlay {
       if (this.lastText === '') return;
       this.lastText = '';
       this.container.style.opacity = '0';
+      this.container.setAttribute('aria-hidden', 'true');
       this.textElement.textContent = '';
       return;
     }
@@ -109,10 +117,14 @@ export class SubtitleOverlay {
       this.lastText = text;
     }
     if (this.container.style.opacity !== '1') this.container.style.opacity = '1';
+    this.container.setAttribute('aria-hidden', 'false');
   }
 
   public clear() {
-    if (this.container) this.container.style.opacity = '0';
+    if (this.container) {
+      this.container.style.opacity = '0';
+      this.container.setAttribute('aria-hidden', 'true');
+    }
     if (this.textElement) this.textElement.textContent = '';
     this.lastText = '';
   }
@@ -133,5 +145,13 @@ function renderMultiLine(element: HTMLElement, text: string) {
   for (let i = 0; i < lines.length; i++) {
     if (i > 0) element.appendChild(document.createElement('br'));
     element.appendChild(document.createTextNode(lines[i]));
+  }
+}
+
+function prefersReducedMotion(): boolean {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
   }
 }

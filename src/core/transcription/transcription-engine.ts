@@ -80,6 +80,7 @@ export class TranscriptionEngine {
     if (this.isDestroyed || this.aotMode) return;
     this.clearLiveClearTimer();
     this.liveSessionId++;
+    this.client.abortPendingLive();
     this.onCaption('', '');
   }
 
