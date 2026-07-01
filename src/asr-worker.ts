@@ -46,12 +46,6 @@ async function detectDevice(): Promise<AsrDevice> {
   return detectedDevice;
 }
 
-type DtypeSpec = string | Record<string, string>;
-
-function dtypeFor(_mode: AsrMode, _device: AsrDevice): DtypeSpec {
-  return 'q8';
-}
-
 function reportProgress(mode: AsrMode) {
   return (progress: { status?: string; loaded?: number; total?: number }) => {
     if (progress.status === 'progress' && progress.total && typeof progress.loaded === 'number') {
@@ -75,7 +69,6 @@ async function loadModel(mode: AsrMode): Promise<boolean> {
     const loadPromise = (async () => {
       try {
         const device = await detectDevice();
-        const dtype = dtypeFor(mode, device);
         const modelId = MODEL_BY_MODE[mode];
 
         const nextTranscriber = await pipeline(
@@ -83,7 +76,7 @@ async function loadModel(mode: AsrMode): Promise<boolean> {
           modelId,
           {
             device,
-            dtype,
+            dtype: 'q8',
             progress_callback: reportProgress(mode),
           }
         );
@@ -102,7 +95,7 @@ async function loadModel(mode: AsrMode): Promise<boolean> {
               MODEL_BY_MODE[mode],
               {
                 device: 'wasm',
-                dtype: dtypeFor(mode, 'wasm'),
+                dtype: 'q8',
                 progress_callback: reportProgress(mode),
               }
             );
@@ -167,21 +160,7 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
       },
     };
     if (!isLive) options.return_timestamps = true;
-    const audioArr = new Float32Array(audio);
-    const audioRms = (() => {
-      let s = 0;
-      for (let i = 0; i < audioArr.length; i++) s += audioArr[i] * audioArr[i];
-      return Math.sqrt(s / Math.max(1, audioArr.length));
-    })();
-    const t0 = performance.now();
-    const result = await transcriber(audioArr, options);
-    const dt = (performance.now() - t0).toFixed(0);
-    console.log(`[mutely:asr] ${mode} id=${id} samples=${audioArr.length} rms=${audioRms.toFixed(4)} took=${dt}ms text=${JSON.stringify(result?.text ?? '').slice(0, 300)} chunks=${result?.chunks?.length ?? 0}`);
-    if (result?.chunks && Array.isArray(result.chunks)) {
-      for (const ch of result.chunks.slice(0, 20)) {
-        console.log(`[mutely:asr]   chunk ts=${JSON.stringify(ch.timestamp)} text=${JSON.stringify(ch.text)}`);
-      }
-    }
+    const result = await transcriber(new Float32Array(audio), options);
     self.postMessage({ type: 'result', id, sessionId, tabId, clientId, result });
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'ABORTED') {

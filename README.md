@@ -267,9 +267,9 @@ Mute.ly runs a minimal **highpass + noise-gate preprocessor** before any audio i
 
 | Parameter | Specification |
 |:---|:---|
-| **ASR Model** | `whisper-tiny.en` (~75MB) for live, `whisper-base.en_timestamped` (~140MB) for VOD |
+| **ASR Model** | `whisper-tiny.en` (~75MB) for live, `whisper-base.en` (~140MB) for VOD |
 | **Inference Backend** | WebGPU when `navigator.gpu` is available, WASM fallback (with auto-retry on late WebGPU init failure) |
-| **Quantization** | ONNX q8 on WASM; fp16 on WebGPU for VOD (encoder + decoder) |
+| **Quantization** | ONNX quantized q8 (8-bit integer weights) on both WebGPU and WASM |
 | **Speech Highpass** | Second-order Butterworth Biquad (`150Hz`, Q ≈ 0.7071) |
 | **Noise Gate** | 20ms frame RMS at `0.015` threshold (-36dBFS) |
 | **Format** | 16kHz mono Float32 Linear PCM, end-to-end |

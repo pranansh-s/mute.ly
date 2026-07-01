@@ -1,6 +1,6 @@
 import { cleanHallucinations } from './hallucination-filter';
 import type { OffscreenClient } from './offscreen-client';
-import type { SpeechActivityWindow, TranscriptionResult } from '../types';
+import type { TranscriptionResult } from '../types';
 import {
   CHUNK_STRIDE_SECONDS,
   type ChunkRequest,
@@ -15,11 +15,8 @@ const SCHEDULER_POLL_MS = 500;
 const CACHE_LIMIT_CHUNKS = 500;
 const CAPTION_END_GRACE_SECONDS = 0.2;
 const BRIDGE_GAP_SECONDS = 0.5;
-const HOLD_AFTER_END_SECONDS = 1;
+const HOLD_AFTER_END_SECONDS = 0.5;
 const MIN_CAPTION_DURATION_SECONDS = 0.5;
-const MAX_CHUNK_FAILURES = 3;
-const SPEECH_ACTIVITY_END_GRACE_SECONDS = 1.15;
-const SPEECH_ACTIVITY_MATCH_GRACE_SECONDS = 0.6;
 
 interface CaptionTimestamp {
   start: number;
@@ -117,7 +114,6 @@ class CaptionCache {
 
 export class AotPipeline {
   private readonly cache = new CaptionCache();
-  private readonly failCountByChunk = new Map<number, number>();
   private pendingQueue: ChunkRequest[] = [];
   private activeChunkKey: string | null = null;
   private isProcessing = false;
@@ -158,7 +154,6 @@ export class AotPipeline {
     this.audioDuration = Infinity;
     this.bufferedDuration = 0;
     this.lastChunkIndex = -1;
-    this.failCountByChunk.clear();
 
     this.rebuildQueue();
     this.restartRenderTimer();
@@ -197,25 +192,16 @@ export class AotPipeline {
     this.activeChunkKey = null;
     this.isProcessing = false;
     this.cache.clear();
-    this.failCountByChunk.clear();
     this.lastText = '';
     this.lastCaptionEnd = 0;
   }
-
-  private lastSeekTime = 0;
 
   private handleSeek = () => {
     if (!this.videoElement || !this.isStarted) return;
 
     const newTime = this.videoElement.currentTime;
-    const activeCoversPlayhead = this.activeChunkCoversTime(newTime);
-    const seekDelta = Math.abs(newTime - this.lastSeekTime);
-    const seekIsLarge = seekDelta > CHUNK_STRIDE_SECONDS / 2;
-    this.lastSeekTime = newTime;
-
-    if (!activeCoversPlayhead || seekIsLarge) {
+    if (!this.activeChunkCoversTime(newTime)) {
       this.seekEpoch++;
-      this.failCountByChunk.clear();
       if (this.isProcessing) {
         this.client.abortActiveAOT();
         this.activeChunkKey = null;
@@ -267,8 +253,7 @@ export class AotPipeline {
       this.videoElement.playbackRate || 1,
       this.getEffectiveDuration()
     );
-    const eligible = needed.filter(c => (this.failCountByChunk.get(c.index) ?? 0) < MAX_CHUNK_FAILURES);
-    this.pendingQueue = pickPending(eligible, (k) => this.cache.has(k), this.activeChunkKey, this.bufferedDuration);
+    this.pendingQueue = pickPending(needed, (k) => this.cache.has(k), this.activeChunkKey, this.bufferedDuration);
     this.processNextChunk();
   }
 
@@ -311,31 +296,13 @@ export class AotPipeline {
     try {
       const result = await this.client.transcribeAOT(startTime, endTime);
       if (!this.isStarted || sessionId !== this.sessionId || seekEpoch !== this.seekEpoch) return;
-      if (result.dropped) {
-        console.log(`[mutely:aot] chunk ${chunk.key} dropped reason=${result.dropReason}`);
-        if (result.dropReason !== 'aborted') {
-          const prior = this.failCountByChunk.get(chunk.index) ?? 0;
-          this.failCountByChunk.set(chunk.index, prior + 1);
-          if (prior + 1 >= MAX_CHUNK_FAILURES) {
-            console.warn(`[mutely:aot] chunk ${chunk.key} exceeded ${MAX_CHUNK_FAILURES} failures; skipping permanently`);
-          }
-        }
-        return;
-      }
+      if (result.dropped) return;
 
-      const captions = parseCaptions(result, startTime, ownedEnd);
-      console.log(`[mutely:aot] chunk ${chunk.key} window=[${startTime.toFixed(2)},${ownedEnd.toFixed(2)}] rawText=${JSON.stringify(result.text ?? '').slice(0, 200)} captions=${captions.length}`);
-      for (const c of captions.slice(0, 10)) {
-        console.log(`[mutely:aot]   cap [${c.start.toFixed(2)},${c.end.toFixed(2)}] ${JSON.stringify(c.text)}`);
-      }
-      this.cache.set(chunk, captions);
-      this.failCountByChunk.delete(chunk.index);
+      this.cache.set(chunk, parseCaptions(result, startTime, ownedEnd));
       this.renderCaptions();
     } catch (error) {
       if (this.isStarted && sessionId === this.sessionId) {
         console.error(`[mutely:aot] Chunk ${chunk.key} failed:`, error);
-        const prior = this.failCountByChunk.get(chunk.index) ?? 0;
-        this.failCountByChunk.set(chunk.index, prior + 1);
       }
     } finally {
       if (sessionId === this.sessionId && seekEpoch === this.seekEpoch) {
@@ -381,7 +348,6 @@ export class AotPipeline {
 
 function parseCaptions(result: TranscriptionResult, startTime: number, ownedEnd: number): CaptionTimestamp[] {
   const words = collectWords(result, startTime, ownedEnd);
-  const activity = normalizeSpeechActivity(result.speechActivity, startTime, ownedEnd);
   let captions: CaptionTimestamp[] = [];
 
   if (words.length > 0) {
@@ -389,7 +355,6 @@ function parseCaptions(result: TranscriptionResult, startTime: number, ownedEnd:
       .map(c => ({ ...c, text: cleanHallucinations(c.text) }))
       .filter(c => c.text)
       .map(c => clampCaption(c.start, c.end, c.text, startTime, ownedEnd))
-      .map(c => alignCaptionToSpeechActivity(c, activity))
       .filter((c): c is CaptionTimestamp => c !== null);
   } else if (result.chunks && Array.isArray(result.chunks)) {
     for (const chunk of result.chunks) {
@@ -400,8 +365,7 @@ function parseCaptions(result: TranscriptionResult, startTime: number, ownedEnd:
       const relEnd = toFinite(chunk.timestamp[1], relStart + MIN_CAPTION_DURATION_SECONDS);
       for (const piece of splitCaptionFromText(cleaned, startTime + relStart, startTime + relEnd)) {
         const clamped = clampCaption(piece.start, piece.end, piece.text, startTime, ownedEnd);
-        const aligned = alignCaptionToSpeechActivity(clamped, activity);
-        if (aligned) captions.push(aligned);
+        if (clamped) captions.push(clamped);
       }
     }
   } else if (result.text) {
@@ -409,8 +373,7 @@ function parseCaptions(result: TranscriptionResult, startTime: number, ownedEnd:
     if (cleaned) {
       for (const piece of splitCaptionFromText(cleaned, startTime, ownedEnd)) {
         const clamped = clampCaption(piece.start, piece.end, piece.text, startTime, ownedEnd);
-        const aligned = alignCaptionToSpeechActivity(clamped, activity);
-        if (aligned) captions.push(aligned);
+        if (clamped) captions.push(clamped);
       }
     }
   }
@@ -419,71 +382,19 @@ function parseCaptions(result: TranscriptionResult, startTime: number, ownedEnd:
   return enforceMinGap(captions);
 }
 
-function normalizeSpeechActivity(
-  activity: SpeechActivityWindow[] | undefined,
-  chunkStart: number,
-  ownedEnd: number
-): SpeechActivityWindow[] {
-  if (!activity || activity.length === 0) return [];
-  return activity
-    .map(w => ({
-      start: clamp(w.start, chunkStart, ownedEnd),
-      end: clamp(w.end, chunkStart, ownedEnd),
-    }))
-    .filter(w => w.end > w.start)
-    .sort((a, b) => a.start - b.start);
-}
-
-function alignCaptionToSpeechActivity(
-  caption: CaptionTimestamp | null,
-  activity: SpeechActivityWindow[]
-): CaptionTimestamp | null {
-  if (!caption) return null;
-  if (activity.length === 0) return caption;
-  const match = findBestSpeechActivity(caption, activity);
-  if (!match) return null;
-  const start = Math.max(caption.start, match.start);
-  const end = Math.min(caption.end, match.end + SPEECH_ACTIVITY_END_GRACE_SECONDS);
-  if (end <= start) return null;
-  return { start, end, text: caption.text };
-}
-
-function findBestSpeechActivity(
-  caption: CaptionTimestamp,
-  activity: SpeechActivityWindow[]
-): SpeechActivityWindow | null {
-  let bestMatch: SpeechActivityWindow | null = null;
-  let bestOverlap = 0;
-  for (const window of activity) {
-    const overlap = Math.min(caption.end, window.end) - Math.max(caption.start, window.start);
-    if (overlap > bestOverlap) {
-      bestOverlap = overlap;
-      bestMatch = window;
-    }
-  }
-  if (bestMatch) return bestMatch;
-  return activity.find(window => (
-    window.start >= caption.start &&
-    window.start <= caption.end + SPEECH_ACTIVITY_MATCH_GRACE_SECONDS
-  )) ?? null;
-}
-
 function collectWords(result: TranscriptionResult, startTime: number, ownedEnd: number): WordTimestamp[] {
   if (!result.chunks || !Array.isArray(result.chunks)) return [];
   const words: WordTimestamp[] = [];
-  let lastEnd = 0;
   for (const chunk of result.chunks) {
     if (!chunk.text || !Array.isArray(chunk.timestamp)) continue;
     const text = chunk.text.trim();
-    if (!text) continue;
+    if (!text || text.includes(' ')) return [];
     const relStart = toFinite(chunk.timestamp[0], NaN);
-    if (!Number.isFinite(relStart)) continue;
-    const charSpan = Math.max(text.length, 1) * 0.06;
-    const relEnd = toFinite(chunk.timestamp[1], relStart + charSpan);
-    const absStart = startTime + Math.max(relStart, lastEnd);
-    const absEnd = startTime + Math.max(relEnd, relStart);
+    const relEnd = toFinite(chunk.timestamp[1], relStart);
+    if (!Number.isFinite(relStart) || !Number.isFinite(relEnd)) return [];
+    const absStart = startTime + relStart;
+    const absEnd = startTime + relEnd;
     if (absStart >= ownedEnd) continue;
-    lastEnd = Math.max(lastEnd, relEnd);
     words.push({ text, start: absStart, end: absEnd });
   }
   return words;

@@ -3,7 +3,6 @@ import type {
   AsrMode,
   OffscreenCommand,
   OffscreenEvent,
-  SpeechActivityWindow,
 } from './core/types';
 import { AotStreamDecoder, type TranscribeAOTRequest } from './core/audio/aot-stream-decoder';
 import { preprocessAudio } from './core/audio/audio-preprocessor';
@@ -26,7 +25,6 @@ interface WorkerJob {
   clientId?: string;
   tabId?: number;
   mode: AsrMode;
-  speechActivity?: SpeechActivityWindow[];
 }
 
 type ModelState = 'idle' | 'loading' | 'ready';
@@ -61,7 +59,6 @@ const decoder = new AotStreamDecoder(
     tabId: request.tabId ?? activeAotOwner?.tabId,
     clientId: request.clientId ?? activeAotOwner?.clientId,
     mode: request.mode,
-    speechActivity: request.speechActivity,
   }),
   (request) => {
     send({
@@ -100,9 +97,7 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       break;
     case 'aot_pcm':
       if (activeAotOwner && msg.clientId === activeAotOwner.clientId) {
-        const bytes = decodeBase64(msg.chunk);
-        console.log(`[mutely:offscreen] aot_pcm rx bytes=${bytes.length} (~${(bytes.length / 4 / 16000).toFixed(2)}s)`);
-        decoder.feed(bytes);
+        decoder.feed(decodeBase64(msg.chunk));
       }
       break;
     case 'aot_pcm_end':
@@ -180,9 +175,6 @@ function handleWorkerMessage(e: MessageEvent<OffscreenEvent>) {
     tabId: msg.tabId ?? finishedJob?.tabId,
     clientId: msg.clientId ?? finishedJob?.clientId,
     sessionId: msg.sessionId ?? finishedJob?.sessionId,
-    result: finishedJob?.speechActivity && !msg.result.dropped
-      ? { ...msg.result, speechActivity: finishedJob.speechActivity }
-      : msg.result,
   });
 
   pumpWorkerQueue();

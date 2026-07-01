@@ -29,7 +29,6 @@ export type OffscreenCommand =
       id: number;
       clientId: string;
       mode: AsrMode;
-      speechActivity?: SpeechActivityWindow[];
     };
 
 export type OffscreenEvent =
@@ -60,13 +59,11 @@ export type WorkerCommand =
       tabId?: number;
       clientId?: string;
       mode: AsrMode;
-      speechActivity?: SpeechActivityWindow[];
     };
 
 export interface TranscriptionResult {
   text?: string;
   chunks?: TranscriptionChunk[];
-  speechActivity?: SpeechActivityWindow[];
   dropped?: boolean;
   dropReason?: string;
 }
@@ -74,9 +71,4 @@ export interface TranscriptionResult {
 export interface TranscriptionChunk {
   text: string;
   timestamp: [number, number] | [number, null];
-}
-
-export interface SpeechActivityWindow {
-  start: number;
-  end: number;
 }

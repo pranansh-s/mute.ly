@@ -13,7 +13,6 @@ interface AotOwner {
 
 let nativePort: chrome.runtime.Port | null = null;
 let activeAotOwner: AotOwner | null = null;
-let forwardChain: Promise<void> = Promise.resolve();
 
 async function ensureOffscreen() {
   if (creationPromise) return creationPromise;
@@ -41,21 +40,15 @@ async function ensureOffscreen() {
   }
 }
 
-function forwardToOffscreen(data: Record<string, unknown>, tabId?: number): Promise<void> {
+async function forwardToOffscreen(data: Record<string, unknown>, tabId?: number) {
   const payload = { ...data, _fromBackground: true, tabId };
-
-  const next = forwardChain.then(async () => {
+  await ensureOffscreen();
+  try {
+    await chrome.runtime.sendMessage(payload);
+  } catch {
     await ensureOffscreen();
-    try {
-      await chrome.runtime.sendMessage(payload);
-    } catch {
-      await ensureOffscreen();
-      try { await chrome.runtime.sendMessage(payload); } catch {}
-    }
-  });
-
-  forwardChain = next.catch(() => {});
-  return next;
+    try { await chrome.runtime.sendMessage(payload); } catch {}
+  }
 }
 
 function sendToTab(tabId: number | undefined, msg: Record<string, unknown>) {
@@ -82,7 +75,7 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
     port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST[connect-throw]: ${message}`, clientId });
+    void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST: ${message}`, clientId });
     activeAotOwner = null;
     return;
   }
@@ -119,7 +112,7 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
     const owner = activeAotOwner;
     nativePort = null;
     if (lastError) {
-      void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST[disconnect]: ${lastError.message ?? 'disconnected'}`, clientId: owner?.clientId }, owner?.tabId);
+      void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST: ${lastError.message ?? 'disconnected'}`, clientId: owner?.clientId }, owner?.tabId);
     } else {
       void forwardToOffscreen({ type: 'aot_pcm_end', clientId: owner?.clientId }, owner?.tabId);
     }
@@ -130,7 +123,7 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
     port.postMessage({ type: 'start', videoId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST[start-throw]: ${message}`, clientId });
+    void forwardToOffscreen({ type: 'aot_pcm_error', reason: `NO_NATIVE_HOST: ${message}`, clientId });
     disconnectNativePort();
     activeAotOwner = null;
   }
@@ -148,19 +141,15 @@ function probeNativeHost(tabId: number | undefined, clientId: string | undefined
     port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const reason = `NO_NATIVE_HOST[connect-throw]: ${message}`;
-    console.error('[mutely:bg] probe failed:', reason);
-    sendToTab(tabId, { type: 'host_status', ok: false, reason, tabId, clientId });
+    sendToTab(tabId, { type: 'host_status', ok: false, reason: `NO_NATIVE_HOST: ${message}`, tabId, clientId });
     return;
   }
 
   let resolved = false;
-  let pingPosted = false;
   const resolve = (ok: boolean, reason?: string) => {
     if (resolved) return;
     resolved = true;
     try { port.disconnect(); } catch {}
-    if (!ok) console.error('[mutely:bg] probe failed:', reason);
     sendToTab(tabId, { type: 'host_status', ok, reason, tabId, clientId });
   };
 
@@ -170,21 +159,17 @@ function probeNativeHost(tabId: number | undefined, clientId: string | undefined
 
   port.onDisconnect.addListener(() => {
     const lastError = chrome.runtime.lastError;
-    resolve(false, `NO_NATIVE_HOST[disconnect]: ${lastError?.message ?? 'disconnected (no lastError)'}`);
+    resolve(false, `NO_NATIVE_HOST: ${lastError?.message ?? 'disconnected'}`);
   });
 
   try {
     port.postMessage({ type: 'ping' });
-    pingPosted = true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const lastError = chrome.runtime.lastError;
-    resolve(false, `NO_NATIVE_HOST[ping-throw]: ${message}${lastError?.message ? ` (lastError: ${lastError.message})` : ''}`);
+    resolve(false, `NO_NATIVE_HOST: ${message}`);
   }
 
-  setTimeout(() => {
-    resolve(false, `NO_NATIVE_HOST[timeout]: ${PROBE_TIMEOUT_MS}ms elapsed (pingPosted=${pingPosted})`);
-  }, PROBE_TIMEOUT_MS);
+  setTimeout(() => resolve(false, 'NO_NATIVE_HOST: probe timeout'), PROBE_TIMEOUT_MS);
 }
 
 async function handleContentCommand(data: Record<string, unknown>, tabId: number | undefined) {
@@ -199,7 +184,7 @@ async function handleContentCommand(data: Record<string, unknown>, tabId: number
   if (type === 'load_aot') {
     const videoId = typeof data.videoId === 'string' ? data.videoId : '';
     if (!videoId || !clientId) {
-      sendToTab(tabId, { type: 'aot_pcm_error', reason: 'NO_NATIVE_HOST[bad-load]: missing videoId or clientId', clientId, tabId });
+      sendToTab(tabId, { type: 'aot_pcm_error', reason: 'NO_NATIVE_HOST: missing videoId or clientId', clientId, tabId });
       return;
     }
     await forwardToOffscreen(data, tabId);

@@ -1,6 +1,5 @@
 const DEFAULT_SAMPLE_RATE = 16_000;
 const HPF_CUTOFF_HZ = 150;
-const LPF_CUTOFF_HZ = 3500;
 const BUTTERWORTH_Q = 0.7071;
 const NOISE_GATE_THRESHOLD = 0.015;
 const GATE_FRAME_SECONDS = 0.02;
@@ -51,22 +50,6 @@ function createHighPassBiquad(cutoffHz: number, sampleRate = DEFAULT_SAMPLE_RATE
   return new BiquadFilter(b0, b1, b2, a1, a2);
 }
 
-function createLowPassBiquad(cutoffHz: number, sampleRate = DEFAULT_SAMPLE_RATE): BiquadFilter {
-  const w0 = (2.0 * Math.PI * cutoffHz) / sampleRate;
-  const cosW0 = Math.cos(w0);
-  const sinW0 = Math.sin(w0);
-  const alpha = sinW0 / (2.0 * BUTTERWORTH_Q);
-
-  const a0 = 1.0 + alpha;
-  const b0 = (1.0 - cosW0) / 2.0 / a0;
-  const b1 = (1.0 - cosW0) / a0;
-  const b2 = (1.0 - cosW0) / 2.0 / a0;
-  const a1 = -2.0 * cosW0 / a0;
-  const a2 = (1.0 - alpha) / a0;
-
-  return new BiquadFilter(b0, b1, b2, a1, a2);
-}
-
 function normalizeGain(audio: Float32Array): void {
   let maxVal = 0;
   for (let i = 0; i < audio.length; i++) {
@@ -99,7 +82,6 @@ export function preprocessAudio(audio: Float32Array, sampleRate = DEFAULT_SAMPLE
   if (audio.length === 0) return;
 
   createHighPassBiquad(HPF_CUTOFF_HZ, sampleRate).process(audio);
-  createLowPassBiquad(LPF_CUTOFF_HZ, sampleRate).process(audio);
   normalizeGain(audio);
   applyNoiseGate(audio, sampleRate, NOISE_GATE_THRESHOLD);
 }
