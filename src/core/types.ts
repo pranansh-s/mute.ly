@@ -11,12 +11,12 @@ export type OffscreenCommand =
   | { type: 'stop_aot'; clientId: string }
   | { type: 'abort_job'; id: number; clientId: string }
   | { type: 'host_probe'; clientId: string }
-  | { type: 'aot_pcm'; chunk: string; clientId?: string }
+  | { type: 'aot_pcm'; chunk: string; seq?: number; clientId?: string }
   | { type: 'aot_pcm_end'; durationSeconds?: number; clientId?: string }
   | { type: 'aot_pcm_error'; reason: string; clientId?: string }
   | {
       type: 'transcribe_live';
-      audio: number[];
+      audio: string;
       id: number;
       sessionId: number;
       clientId: string;
@@ -53,7 +53,7 @@ export type WorkerCommand =
   | { type: 'abort_chunk'; id: number }
   | {
       type: 'transcribe_live' | 'transcribe_aot';
-      audio: number[];
+      audio: Float32Array;
       id: number;
       sessionId?: number;
       tabId?: number;

@@ -32,15 +32,20 @@ class YouTubeMonitor {
     document.addEventListener('yt-page-data-updated', this.handleNavigationEvent);
   }
 
-  private initObserver() {
-    const observer = new MutationObserver(async () => {
-      this.playerButton.checkAndInject();
-      if (this.isRunning) {
-        this.subtitleOverlay.checkAndInject();
-        this.errorOverlay.checkAndInject();
-      }
+  private mutationThrottleTimer: ReturnType<typeof setTimeout> | null = null;
 
-      this.scheduleNavigationCheck();
+  private initObserver() {
+    const observer = new MutationObserver(() => {
+      if (this.mutationThrottleTimer) return;
+      this.mutationThrottleTimer = setTimeout(() => {
+        this.mutationThrottleTimer = null;
+        this.playerButton.checkAndInject();
+        if (this.isRunning) {
+          this.subtitleOverlay.checkAndInject();
+          this.errorOverlay.checkAndInject();
+        }
+        this.scheduleNavigationCheck();
+      }, 500);
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
@@ -88,11 +93,17 @@ class YouTubeMonitor {
     const runVideoId = this.currentVideoId;
 
     try {
+      let engineErrorMessage: string | null = null;
       const engine = new TranscriptionEngine((committed, tentative) => {
         if (!this.isCurrentProcessingRun(generation, engine)) return;
         this.subtitleOverlay.renderText(committed, tentative);
       });
       this.engine = engine;
+
+      engine.onError = (message) => {
+        if (!this.isCurrentProcessingRun(generation, engine)) return;
+        engineErrorMessage = message;
+      };
 
       engine.onStatusChange = (status) => {
         if (!this.isRunning || !this.isCurrentProcessingRun(generation, engine)) return;
@@ -107,7 +118,8 @@ class YouTubeMonitor {
           this.isRunning = false;
           engine.destroy();
           if (this.engine === engine) this.engine = null;
-          this.errorOverlay.showError('Model Load Failed', 'The transcription engine could not be initialized.');
+          const { title, advice } = mapErrorToUI(new Error(engineErrorMessage ?? 'MODEL_LOAD_FAILED'));
+          this.errorOverlay.showError(title, advice);
         }
       };
 
@@ -206,7 +218,7 @@ class YouTubeMonitor {
   };
 
   private scheduleNavigationCheck() {
-    this.clearNavigationCheck();
+    if (this.navigationCheckTimer) return;
     this.navigationCheckTimer = setTimeout(() => {
       this.navigationCheckTimer = null;
       void this.reconcileNavigationState();

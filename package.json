@@ -8,7 +8,7 @@
     "clean": "rm -rf dist",
     "install-host": "node host/install.cjs",
     "uninstall-host": "node host/uninstall.cjs",
-    "test:scheduler": "tsc && node --test test/aot-scheduler.test.mjs"
+    "test": "rm -rf .test-build && esbuild src/core/transcription/aot-pipeline.ts src/core/transcription/aot-scheduler.ts src/core/transcription/caption-splitter.ts src/core/transcription/hallucination-filter.ts src/core/transcription/transcription-engine.ts src/core/audio/aot-stream-decoder.ts --bundle --format=esm --outbase=src/core --outdir=.test-build --log-level=warning && node --test test/"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

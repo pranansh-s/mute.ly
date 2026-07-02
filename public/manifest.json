@@ -4,6 +4,12 @@
   "version": "3.0.0",
   "minimum_chrome_version": "116",
   "description": "Free, private YouTube captions powered by local AI — no server, no API keys, no data ever leaves your browser",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": [
     "offscreen",
     "nativeMessaging"

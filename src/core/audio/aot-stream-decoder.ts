@@ -16,7 +16,7 @@ const RMS_SILENCE_THRESHOLD = 0.0001;
 
 interface PcmSegment {
   startSample: number;
-  audio: Float32Array;
+  audio: Int16Array;
 }
 
 export class AotStreamDecoder {
@@ -25,6 +25,7 @@ export class AotStreamDecoder {
   private streamActive = false;
   private leftoverBuffer = new Uint8Array(0);
   private lastProgressSeconds = 0;
+  private nextSeq = 0;
 
   constructor(
     private readonly onProgress: (bufferedSeconds: number) => void,
@@ -41,6 +42,7 @@ export class AotStreamDecoder {
     this.bufferedSamples = 0;
     this.leftoverBuffer = new Uint8Array(0);
     this.lastProgressSeconds = 0;
+    this.nextSeq = 0;
   }
 
   public beginStream() {
@@ -48,8 +50,16 @@ export class AotStreamDecoder {
     this.streamActive = true;
   }
 
-  public feed(bytes: Uint8Array) {
+  public feed(bytes: Uint8Array, seq?: number) {
     if (!this.streamActive || bytes.length === 0) return;
+
+    if (typeof seq === 'number') {
+      if (seq !== this.nextSeq) {
+        this.failStream(`PCM_GAP: expected frame ${this.nextSeq}, received ${seq}`);
+        return;
+      }
+      this.nextSeq++;
+    }
 
     const samples = decodePcmChunk(bytes, this.leftoverBuffer);
     this.leftoverBuffer = samples.leftover;
@@ -57,7 +67,7 @@ export class AotStreamDecoder {
 
     this.audioChunks.push({
       startSample: this.bufferedSamples,
-      audio: samples.audio,
+      audio: quantizeToInt16(samples.audio),
     });
     this.bufferedSamples += samples.audio.length;
 
@@ -136,8 +146,9 @@ export class AotStreamDecoder {
 
       const from = Math.max(0, startSample - chunkStart);
       const to = Math.min(audio.length, endSample - chunkStart);
-      output.set(audio.subarray(from, to), targetOffset);
-      targetOffset += to - from;
+      for (let i = from; i < to; i++) {
+        output[targetOffset++] = audio[i] / 32767;
+      }
       chunkIndex++;
     }
 
@@ -188,6 +199,16 @@ function decodePcmChunk(value: Uint8Array, leftoverBuffer: Uint8Array) {
     audio: new Float32Array(alignedCopy.buffer, alignedCopy.byteOffset, alignedCopy.length / 4),
     leftover,
   };
+}
+
+function quantizeToInt16(audio: Float32Array): Int16Array {
+  const out = new Int16Array(audio.length);
+  for (let i = 0; i < audio.length; i++) {
+    const v = audio[i];
+    const clamped = v > 1 ? 1 : v < -1 ? -1 : v;
+    out[i] = Math.round(clamped * 32767);
+  }
+  return out;
 }
 
 function calculateRms(audio: Float32Array) {

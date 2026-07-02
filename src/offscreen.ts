@@ -19,7 +19,7 @@ interface AotOwner {
 
 interface WorkerJob {
   kind: 'transcribe_aot' | 'transcribe_live';
-  audio: Float32Array | number[];
+  audio: Float32Array;
   id: number;
   sessionId?: number;
   clientId?: string;
@@ -88,6 +88,14 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       requestModelLoad(msg.mode);
       break;
     case 'load_aot':
+      if (activeAotOwner && activeAotOwner.clientId !== msg.clientId) {
+        send({
+          type: 'error',
+          message: 'AOT_TAKEOVER: captions were started in another tab',
+          tabId: activeAotOwner.tabId,
+          clientId: activeAotOwner.clientId,
+        });
+      }
       stopAotForClient();
       activeAotOwner = { tabId: msg.tabId, clientId: msg.clientId };
       decoder.beginStream();
@@ -97,7 +105,7 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       break;
     case 'aot_pcm':
       if (activeAotOwner && msg.clientId === activeAotOwner.clientId) {
-        decoder.feed(decodeBase64(msg.chunk));
+        decoder.feed(decodeBase64(msg.chunk), msg.seq);
       }
       break;
     case 'aot_pcm_end':
@@ -117,7 +125,7 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       if (msg.clientId !== activeAotOwner?.clientId) {
         sendDropped({
           kind: 'transcribe_aot',
-          audio: [],
+          audio: new Float32Array(0),
           id: msg.id,
           tabId: msg.tabId,
           clientId: msg.clientId,
@@ -128,11 +136,12 @@ chrome.runtime.onMessage.addListener((msg: RoutedCommand) => {
       decoder.transcribeSlice(msg as unknown as TranscribeAOTRequest);
       break;
     case 'transcribe_live': {
-      const floatAudio = new Float32Array(msg.audio);
+      const bytes = decodeBase64(msg.audio);
+      const floatAudio = new Float32Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 4));
       preprocessAudio(floatAudio);
       enqueueWorkerJob({
         kind: 'transcribe_live',
-        audio: Array.from(floatAudio),
+        audio: floatAudio,
         id: msg.id,
         sessionId: msg.sessionId,
         tabId: msg.tabId,
@@ -304,15 +313,18 @@ function pumpWorkerQueue() {
   activeWorkerJob = job;
   armActiveWorkerJobWatchdog(job);
 
-  worker.postMessage({
-    type: job.kind,
-    audio: job.audio,
-    id: job.id,
-    sessionId: job.sessionId,
-    tabId: job.tabId,
-    clientId: job.clientId,
-    mode: job.mode,
-  });
+  worker.postMessage(
+    {
+      type: job.kind,
+      audio: job.audio,
+      id: job.id,
+      sessionId: job.sessionId,
+      tabId: job.tabId,
+      clientId: job.clientId,
+      mode: job.mode,
+    },
+    [job.audio.buffer]
+  );
 }
 
 function armActiveWorkerJobWatchdog(job: WorkerJob) {

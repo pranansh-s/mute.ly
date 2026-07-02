@@ -34,10 +34,31 @@ export function mapErrorToUI(error: unknown): UIErrorData {
     };
   }
 
+  if (errMsg.includes('AOT_TAKEOVER')) {
+    return {
+      title: 'Captions Stopped',
+      advice: 'Captions were started in another tab. Click the Mute.ly button here to take them back.'
+    };
+  }
+
+  if (errMsg.includes('PCM_GAP')) {
+    return {
+      title: 'Audio Stream Interrupted',
+      advice: 'The audio download was interrupted. Click the Mute.ly button to restart captions.'
+    };
+  }
+
+  if (errMsg.includes('MODEL_LOAD_FAILED') || errMsg.includes('Model load') || errMsg.includes('Worker crash')) {
+    return {
+      title: 'Model Load Failed',
+      advice: 'The transcription engine could not be initialized. Check your connection and click the Mute.ly button to retry.'
+    };
+  }
+
   if (errMsg.includes('Permission denied') || errMsg.includes('Requested device not found')) {
     return {
-      title: 'Microphone Access Denied',
-      advice: 'Live extraction requires microphone permissions. Please allow access in your browser settings.'
+      title: 'Audio Capture Blocked',
+      advice: 'Could not capture the video\'s audio stream. Reload the page and try again.'
     };
   }
 

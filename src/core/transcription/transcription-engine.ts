@@ -23,6 +23,7 @@ export class TranscriptionEngine {
   public onStatusChange?: (status: ModelStatus) => void;
   public onLoadProgress?: (progress: number) => void;
   public onDeviceChange?: (device: AsrDevice) => void;
+  public onError?: (message: string) => void;
 
   constructor(onCaption: CaptionCallback) {
     this.onCaption = onCaption;
@@ -35,6 +36,7 @@ export class TranscriptionEngine {
     };
     this.client.onLoadProgress = (p) => this.onLoadProgress?.(p);
     this.client.onDeviceChange = (d) => this.onDeviceChange?.(d);
+    this.client.onError = (message) => this.onError?.(message);
 
     this.client.onAotBufferProgress = (seconds) => {
       if (this.isDestroyed) return;
@@ -96,7 +98,7 @@ export class TranscriptionEngine {
   }
 
   private async runLive(audio: Float32Array) {
-    const sessionId = ++this.liveSessionId;
+    const sessionId = this.liveSessionId;
     const result: TranscriptionResult = await this.client.transcribeLive(audio, sessionId);
     if (this.isDestroyed || sessionId !== this.liveSessionId) return;
 
@@ -128,5 +130,5 @@ export class TranscriptionEngine {
 function formatLiveCaption(text: string): string {
   const pieces = splitCaptionFromText(text, 0, 1);
   if (pieces.length === 0) return '';
-  return pieces.map(p => p.text).join('\n');
+  return pieces[pieces.length - 1].text;
 }

@@ -29,6 +29,7 @@ export class OffscreenClient {
   public onAotBufferProgress?: (seconds: number) => void;
   public onAotReady?: (duration: number) => void;
   public onDeviceChange?: (device: AsrDevice) => void;
+  public onError?: (message: string) => void;
 
   constructor() {
     chrome.runtime.onMessage.addListener(this.handleMessage);
@@ -134,7 +135,7 @@ export class OffscreenClient {
 
       this.sendToOffscreen({
         type: 'transcribe_live',
-        audio: Array.from(audio),
+        audio: encodeFloat32Base64(audio),
         id,
         sessionId,
         clientId: this.clientId,
@@ -227,6 +228,7 @@ export class OffscreenClient {
       case 'error':
         if (msg.mode && msg.mode !== this.requestedMode) return;
         console.error('[mutely:engine] Error from offscreen:', msg.message);
+        this.onError?.(msg.message);
         this.onStatusChange?.('error');
         break;
       case 'result':
@@ -259,4 +261,14 @@ export class OffscreenClient {
       throw new Error(response.error || 'Offscreen message failed');
     }
   }
+}
+
+function encodeFloat32Base64(audio: Float32Array): string {
+  const bytes = new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength);
+  let binary = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
 }

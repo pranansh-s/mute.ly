@@ -25,9 +25,11 @@ interface CaptionTimestamp {
   text: string;
 }
 
-class CaptionCache {
+export class CaptionCache {
   private chunks = new Map<string, CaptionTimestamp[]>();
   private keyByIndex = new Map<number, string>();
+  private windowChunk = -1;
+  private windowCaptions: CaptionTimestamp[] = [];
 
   public has(key: string) {
     return this.chunks.has(key);
@@ -40,21 +42,18 @@ class CaptionCache {
 
     this.keyByIndex.set(chunk.index, chunk.key);
     this.chunks.set(chunk.key, captions);
+    this.windowChunk = -1;
     this.trim();
   }
 
   public find(currentTime: number): CaptionTimestamp | null {
     const currentChunk = Math.floor(currentTime / CHUNK_STRIDE_SECONDS);
-    const visible: CaptionTimestamp[] = [];
-
-    for (let i = currentChunk - 1; i <= currentChunk + 1; i++) {
-      const cached = this.get(i);
-      if (cached) visible.push(...cached);
+    if (currentChunk !== this.windowChunk) {
+      this.windowChunk = currentChunk;
+      this.windowCaptions = this.buildWindow(currentChunk);
     }
-    if (visible.length === 0) return null;
-
-    visible.sort((a, b) => a.start - b.start);
-    const deduped = dedupeOverlap(visible);
+    const deduped = this.windowCaptions;
+    if (deduped.length === 0) return null;
 
     let lo = 0;
     let hi = deduped.length;
@@ -86,16 +85,20 @@ class CaptionCache {
   public clear() {
     this.chunks.clear();
     this.keyByIndex.clear();
+    this.windowChunk = -1;
+    this.windowCaptions = [];
   }
 
-  private get(chunkIndex: number) {
-    const key = this.keyByIndex.get(chunkIndex);
-    if (!key) return null;
-    const captions = this.chunks.get(key);
-    if (!captions) return null;
-    this.chunks.delete(key);
-    this.chunks.set(key, captions);
-    return captions;
+  private buildWindow(currentChunk: number): CaptionTimestamp[] {
+    const visible: CaptionTimestamp[] = [];
+    for (let i = currentChunk - 1; i <= currentChunk + 1; i++) {
+      const key = this.keyByIndex.get(i);
+      const cached = key ? this.chunks.get(key) : undefined;
+      if (cached) visible.push(...cached);
+    }
+    if (visible.length === 0) return visible;
+    visible.sort((a, b) => a.start - b.start);
+    return dedupeOverlap(visible);
   }
 
   private trim() {
@@ -113,8 +116,11 @@ class CaptionCache {
   }
 }
 
+const MAX_CHUNK_DROPS = 3;
+
 export class AotPipeline {
   private readonly cache = new CaptionCache();
+  private readonly dropCounts = new Map<string, number>();
   private pendingQueue: ChunkRequest[] = [];
   private activeChunkKey: string | null = null;
   private isProcessing = false;
@@ -156,9 +162,10 @@ export class AotPipeline {
     this.audioDuration = Infinity;
     this.bufferedDuration = 0;
     this.lastChunkIndex = -1;
+    this.dropCounts.clear();
 
     this.rebuildQueue();
-    this.restartRenderTimer();
+    if (!videoElement.paused) this.restartRenderTimer();
     this.restartSchedulerTimer();
 
     videoElement.addEventListener('seeking', this.handleSeek);
@@ -166,6 +173,8 @@ export class AotPipeline {
     videoElement.addEventListener('timeupdate', this.handleTimeUpdate);
     videoElement.addEventListener('ended', this.handleEnded);
     videoElement.addEventListener('ratechange', this.handleRateChange);
+    videoElement.addEventListener('pause', this.handlePause);
+    videoElement.addEventListener('play', this.handlePlay);
   }
 
   public updateBufferedDuration(seconds: number) {
@@ -197,6 +206,7 @@ export class AotPipeline {
     this.activeChunkKey = null;
     this.isProcessing = false;
     this.cache.clear();
+    this.dropCounts.clear();
     this.lastText = '';
     this.lastCaptionEnd = 0;
   }
@@ -260,6 +270,17 @@ export class AotPipeline {
 
   private handleEnded = () => {
     this.clearRenderedCaption();
+  };
+
+  private handlePause = () => {
+    this.renderCaptions();
+    if (this.renderTimer) clearInterval(this.renderTimer);
+    this.renderTimer = null;
+  };
+
+  private handlePlay = () => {
+    if (!this.isStarted) return;
+    this.restartRenderTimer();
   };
 
   private handleRateChange = () => {
@@ -331,8 +352,16 @@ export class AotPipeline {
     try {
       const result = await this.client.transcribeAOT(startTime, endTime);
       if (!this.isStarted || sessionId !== this.sessionId || seekEpoch !== this.seekEpoch) return;
-      if (result.dropped) return;
+      if (result.dropped) {
+        if (result.dropReason === 'audio-unavailable') {
+          const drops = (this.dropCounts.get(chunk.key) ?? 0) + 1;
+          this.dropCounts.set(chunk.key, drops);
+          if (drops >= MAX_CHUNK_DROPS) this.cache.set(chunk, []);
+        }
+        return;
+      }
 
+      this.dropCounts.delete(chunk.key);
       this.cache.set(chunk, parseCaptions(result, startTime, ownedEnd));
       this.renderCaptions();
     } catch (error) {
@@ -372,6 +401,8 @@ export class AotPipeline {
     this.videoElement.removeEventListener('timeupdate', this.handleTimeUpdate);
     this.videoElement.removeEventListener('ended', this.handleEnded);
     this.videoElement.removeEventListener('ratechange', this.handleRateChange);
+    this.videoElement.removeEventListener('pause', this.handlePause);
+    this.videoElement.removeEventListener('play', this.handlePlay);
     this.videoElement = null;
   }
 

@@ -105,13 +105,13 @@ function startNativeStream(videoId: string, tabId: number | undefined, clientId:
 
   nativePort = port;
 
-  port.onMessage.addListener((msg: { type?: string; chunk?: string; durationSeconds?: number; message?: string; code?: string }) => {
+  port.onMessage.addListener((msg: { type?: string; chunk?: string; seq?: number; durationSeconds?: number; message?: string; code?: string }) => {
     if (port !== nativePort) return;
     if (!msg || typeof msg.type !== 'string') return;
 
     const owner = activeAotOwner;
     if (msg.type === 'pcm' && typeof msg.chunk === 'string') {
-      void forwardToOffscreen({ type: 'aot_pcm', chunk: msg.chunk, clientId: owner?.clientId }, owner?.tabId);
+      void forwardToOffscreen({ type: 'aot_pcm', chunk: msg.chunk, seq: msg.seq, clientId: owner?.clientId }, owner?.tabId);
       return;
     }
     if (msg.type === 'end') {

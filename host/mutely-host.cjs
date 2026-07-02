@@ -21,6 +21,7 @@ let activeYtDlp = null;
 let activeFfmpeg = null;
 let pcmBuffered = Buffer.alloc(0);
 let totalBytes = 0;
+let pcmSeq = 0;
 
 process.stdin.on('data', (chunk) => {
   stdinBuffer = Buffer.concat([stdinBuffer, chunk]);
@@ -58,8 +59,8 @@ function handleMessage(msg) {
   if (!msg || typeof msg.type !== 'string') return;
 
   if (msg.type === 'start') {
-    if (typeof msg.videoId !== 'string' || !msg.videoId) {
-      sendError('Missing videoId');
+    if (typeof msg.videoId !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(msg.videoId)) {
+      sendError('Invalid videoId');
       return;
     }
     startStream(msg.videoId);
@@ -81,6 +82,7 @@ function startStream(videoId) {
   killStream();
   pcmBuffered = Buffer.alloc(0);
   totalBytes = 0;
+  pcmSeq = 0;
 
   let ytDlp;
   try {
@@ -170,7 +172,7 @@ function startStream(videoId) {
 
 function emitPcm(buffer) {
   totalBytes += buffer.length;
-  send({ type: 'pcm', chunk: buffer.toString('base64') });
+  send({ type: 'pcm', seq: pcmSeq++, chunk: buffer.toString('base64') });
 }
 
 function killStream() {

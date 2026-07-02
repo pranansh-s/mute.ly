@@ -26,6 +26,8 @@ let detectedDevice: AsrDevice | null = null;
 let currentProcessingId: number | null = null;
 let abortCurrentChunk = false;
 
+console.info('[mutely:asr] crossOriginIsolated:', self.crossOriginIsolated);
+
 async function detectDevice(): Promise<AsrDevice> {
   if (detectedDevice) return detectedDevice;
   try {
@@ -159,8 +161,10 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
         if (abortCurrentChunk) throw new Error('ABORTED');
       },
     };
-    if(!isLive) options.return_timestamps = true;
-    const result = await transcriber(new Float32Array(audio), options);
+    if (!isLive) options.return_timestamps = true;
+
+    const floatAudio = audio instanceof Float32Array ? audio : new Float32Array(audio);
+    const result = await transcriber(floatAudio, options);
     self.postMessage({ type: 'result', id, sessionId, tabId, clientId, result });
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'ABORTED') {
