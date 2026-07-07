@@ -26,7 +26,7 @@
 
 ## What It Does
 
-Mute.ly is a Chrome extension that transcribes YouTube audio locally with Whisper, for both live streams and VODs.
+Mute.ly is a Chrome extension that transcribes YouTube audio locally with on-device ASR models — Moonshine for live streams, Whisper for VODs.
 
 - **Private by design** — inference runs in-browser via WebAssembly/WebGPU; VOD audio is pulled by a local native process, never a remote server.
 - **Zero setup** — no accounts, no API keys, no subscription.
@@ -36,15 +36,15 @@ Mute.ly is a Chrome extension that transcribes YouTube audio locally with Whispe
 
 ## Key Features
 
-**Local audio DSP** — every slice is cleaned before it reaches Whisper: a 150Hz Butterworth high-pass biquad strips rumble and hum, and a 20ms-frame noise gate silences background noise that would otherwise get hallucinated into text. A chunk-level RMS gate also short-circuits fully silent 30-second VOD windows before they hit inference.
+**Local audio DSP** — every slice is cleaned before it reaches the model: a 150Hz Butterworth high-pass biquad strips rumble and hum, and a 20ms-frame noise gate silences background noise that would otherwise get hallucinated into text. A chunk-level RMS gate also short-circuits fully silent 30-second VOD windows before they hit inference.
 
 **Dual transcription pipeline** — live audio is segmented by Silero VAD v5, with each finished utterance (plus a 3s flush for long ones) sent off as it completes. VOD audio is fetched ahead of playback in 30-second chunks on a 25-second stride, keyed by time range so re-seeking never re-transcribes finished work.
 
-**Cinema-style captions** — Whisper output is split on sentence boundaries into ≤42-character, two-line captions with a minimum on-screen duration, so text never flashes faster than it can be read. A dedicated filter also strips Whisper's known phantom-text patterns.
+**Cinema-style captions** — model output is split on sentence boundaries into ≤42-character, two-line captions with a minimum on-screen duration, so text never flashes faster than it can be read. A dedicated filter also strips known ASR phantom-text patterns.
 
 **MV3-safe lifecycle** — a sub-audible 1Hz oscillator keeps the offscreen document alive, and the background worker pings the native host every 20s while streaming, working around Manifest V3's aggressive context suspension. Every message carries a tab/client ID so a stale tab can never write into an active session.
 
-**Seek-aware VOD scheduling** — seeking prunes queued work outside the new playhead, keeps in-flight chunks that are still useful, and aborts/restarts the Whisper worker if the active job no longer matches where playback jumped to.
+**Seek-aware VOD scheduling** — seeking prunes queued work outside the new playhead, keeps in-flight chunks that are still useful, and aborts/restarts the ASR worker if the active job no longer matches where playback jumped to.
 
 ---
 
@@ -89,7 +89,7 @@ Four isolated MV3 contexts talk only via message passing; a Chrome **native mess
    Registers `com.mutely.host.json` for your OS's browsers and refuses to install if `yt-dlp`/`ffmpeg` aren't on PATH.
 4. **Use it:** open any YouTube video and click the speaker icon in the player controls. Chrome spawns the host process on demand — no terminal, no server to run.
 
-*First run downloads the model (~75MB live / ~140MB VOD) and caches it in IndexedDB for instant startup after.*
+*First run downloads the model (~60MB live / ~80MB VOD) and caches it in the browser for instant startup after.*
 
 ## Project Structure
 
@@ -107,7 +107,7 @@ Four isolated MV3 contexts talk only via message passing; a Chrome **native mess
 │   ├── background.ts            # Service worker: offscreen lifecycle + message relay + native port
 │   ├── content.ts               # Content script: YouTube monitor, UI overlay, mode select
 │   ├── offscreen.ts             # Hidden DOM: worker queue, AOT decoder, keep-alive oscillator
-│   ├── asr-worker.ts            # Web Worker: ONNX Whisper inference (WebGPU/WASM)
+│   ├── asr-worker.ts            # Web Worker: ONNX ASR inference — Moonshine live / Whisper VOD (WebGPU/WASM)
 │   ├── core/
 │   │   ├── types.ts                       # OffscreenCommand / OffscreenEvent / WorkerCommand unions
 │   │   ├── audio/
@@ -120,7 +120,7 @@ Four isolated MV3 contexts talk only via message passing; a Chrome **native mess
 │   │   │   ├── aot-pipeline.ts            # Render loop + caption cache (LRU 500)
 │   │   │   ├── caption-splitter.ts        # Cinema-style caption layout + reading-rate enforcement
 │   │   │   ├── aot-scheduler.ts           # Pure chunk-window math (30s window / 25s stride)
-│   │   │   └── hallucination-filter.ts    # Filters Whisper phantom-text patterns
+│   │   │   └── hallucination-filter.ts    # Filters ASR phantom-text patterns
 │   │   ├── errors/
 │   │   │   └── error-mapper.ts            # Runtime errors → user-facing title/advice
 │   │   └── youtube/
@@ -138,7 +138,7 @@ Four isolated MV3 contexts talk only via message passing; a Chrome **native mess
 
 | Parameter | Specification |
 |:---|:---|
-| **ASR Model** | `whisper-tiny.en` (~75MB) for live, `whisper-base.en` (~140MB) for VOD |
+| **ASR Model** | `moonshine-base` (~60MB) for live — encodes actual clip length, no 30s padding — `whisper-base.en` (~80MB) for VOD |
 | **Inference Backend** | WebGPU when `navigator.gpu` is available, WASM fallback (with auto-retry on late WebGPU init failure) |
 | **Quantization** | ONNX quantized q8 (8-bit integer weights) on both WebGPU and WASM |
 | **Speech Highpass** | Second-order Butterworth Biquad (`150Hz`, Q ≈ 0.7071) |

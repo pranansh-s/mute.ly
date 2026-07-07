@@ -12,11 +12,10 @@ env.backends.onnx.wasm.proxy = false;
 env.backends.onnx.wasm.wasmPaths = location.origin + '/assets/';
 
 const MODEL_BY_MODE: Record<AsrMode, string> = {
-  live: 'onnx-community/whisper-tiny.en',
+  live: 'onnx-community/moonshine-base-ONNX',
   vod: 'onnx-community/whisper-base.en',
 };
 
-const MAX_NEW_TOKENS_LIVE = 224;
 const MAX_NEW_TOKENS_VOD = 256;
 
 const transcribers = new Map<AsrMode, Transcriber>();
@@ -155,13 +154,15 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
   try {
     const isLive = type === 'transcribe_live';
     const options: Record<string, unknown> = {
-      max_new_tokens: isLive ? MAX_NEW_TOKENS_LIVE : MAX_NEW_TOKENS_VOD,
       num_beams: 1,
       callback_function: () => {
         if (abortCurrentChunk) throw new Error('ABORTED');
       },
     };
-    if (!isLive) options.return_timestamps = true;
+    if (!isLive) {
+      options.max_new_tokens = MAX_NEW_TOKENS_VOD;
+      options.return_timestamps = true;
+    }
 
     const floatAudio = audio instanceof Float32Array ? audio : new Float32Array(audio);
     const result = await transcriber(floatAudio, options);
